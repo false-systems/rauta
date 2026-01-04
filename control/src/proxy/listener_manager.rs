@@ -138,6 +138,7 @@ impl ListenerManager {
     ///
     /// The SniResolver provides SNI-based certificate selection for multiple hostnames.
     /// ALPN is configured to negotiate HTTP/2 (h2) or fall back to HTTP/1.1.
+    #[allow(clippy::expect_used)] // Constructor should panic on invalid TLS config (fail-fast)
     pub fn with_tls(
         router: Arc<Router>,
         rate_limiter: Arc<crate::proxy::rate_limiter::RateLimiter>,
