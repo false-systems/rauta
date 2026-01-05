@@ -425,6 +425,22 @@ impl Router {
         Self::default()
     }
 
+    /// Create router with custom health check configuration
+    ///
+    /// Used for testing and production deployments where health checking
+    /// needs to be explicitly enabled or configured.
+    #[allow(dead_code)] // Used by tests and main.rs
+    pub fn with_health_config(health_config: HealthCheckConfig, registry: &prometheus::Registry) -> Self {
+        Self {
+            routes: Arc::new(RwLock::new(HashMap::new())),
+            prefix_router: Arc::new(RwLock::new(matchit::Router::new())),
+            draining_backends: Arc::new(RwLock::new(HashMap::new())),
+            backend_health: Arc::new(RwLock::new(HashMap::new())),
+            health_checker: Arc::new(HealthChecker::new(health_config, registry)),
+            route_cache: Arc::new(RwLock::new(RouteLruCache::new(ROUTE_CACHE_MAX_SIZE))),
+        }
+    }
+
     /// Get route cache statistics (hits, misses)
     ///
     /// Useful for monitoring cache effectiveness.
@@ -473,11 +489,9 @@ impl Router {
         // Build Maglev table for this route
         let maglev_table = maglev_build_compact_table(&backends);
 
-        // TODO: Start active health checking for new backends
-        // Currently disabled because it breaks tests (backends get marked unhealthy immediately)
-        // Need to add configuration flag to enable/disable health checking
-        // self.health_checker
-        //     .start_checking(backends.clone(), path.to_string());
+        // Start active health checking for backends (if enabled in config)
+        self.health_checker
+            .start_checking(backends.clone(), path.to_string());
 
         let route = Route {
             pattern: Arc::from(path), // Convert to Arc<str> once during route setup
@@ -3260,5 +3274,87 @@ mod tests {
             "Cache should be bounded (got {} entries)",
             cache_size
         );
+    }
+
+    // ============================================
+    // Feature: Active Health Checking Integration
+    // ============================================
+
+    #[test]
+    fn test_router_with_health_checking_enabled() {
+        // RED: Test that Router with enabled health checking doesn't panic
+        // and properly integrates with HealthChecker
+
+        use prometheus::Registry;
+
+        // Create health check config with enabled = true
+        let health_config = HealthCheckConfig {
+            enabled: true,
+            interval: Duration::from_secs(5),
+            timeout: Duration::from_secs(2),
+            unhealthy_threshold: 3,
+            healthy_threshold: 2,
+        };
+
+        let registry = Registry::new();
+        let router = Router::with_health_config(health_config, &registry);
+
+        // Add a route with fake backends
+        let backends = vec![
+            Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 1), 8080, 100),
+            Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 2), 8080, 100),
+        ];
+
+        router
+            .add_route(HttpMethod::GET, "/api/test", backends.clone())
+            .expect("Should add route with health checking enabled");
+
+        // Verify route works
+        let route_match = router
+            .select_backend(HttpMethod::GET, "/api/test", None, None)
+            .expect("Should find backend");
+
+        let backend_ip = route_match.backend.as_ipv4().unwrap();
+        assert!(
+            backend_ip == Ipv4Addr::new(10, 0, 1, 1) || backend_ip == Ipv4Addr::new(10, 0, 1, 2)
+        );
+
+        // Verify all backends are initially healthy (not yet checked)
+        for backend in backends {
+            assert!(
+                router.health_checker.is_healthy(&backend),
+                "Backend should be healthy by default (not yet checked)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_router_with_health_checking_disabled() {
+        // GREEN: Test that default Router has health checking disabled
+        let router = Router::new();
+
+        let backends = vec![Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 1), 8080, 100)];
+
+        router
+            .add_route(HttpMethod::GET, "/api/test", backends.clone())
+            .expect("Should add route with health checking disabled");
+
+        // Verify route works
+        let route_match = router
+            .select_backend(HttpMethod::GET, "/api/test", None, None)
+            .expect("Should find backend");
+
+        assert_eq!(
+            route_match.backend.as_ipv4().unwrap(),
+            Ipv4Addr::new(10, 0, 1, 1)
+        );
+
+        // Verify backends are healthy (health checking not running)
+        for backend in backends {
+            assert!(
+                router.health_checker.is_healthy(&backend),
+                "Backend should be healthy (health checking disabled)"
+            );
+        }
     }
 }

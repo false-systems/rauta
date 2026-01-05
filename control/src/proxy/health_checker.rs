@@ -35,8 +35,9 @@ fn safe_write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 
 /// Health check configuration
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // TODO: Remove when health checking is enabled in router
 pub struct HealthCheckConfig {
+    /// Enable active health checking (default: false)
+    pub enabled: bool,
     /// Probe interval (default: 5 seconds)
     pub interval: Duration,
     /// Probe timeout (default: 2 seconds)
@@ -50,6 +51,7 @@ pub struct HealthCheckConfig {
 impl Default for HealthCheckConfig {
     fn default() -> Self {
         Self {
+            enabled: false, // Disabled by default (conservative)
             interval: Duration::from_secs(5),
             timeout: Duration::from_secs(2),
             unhealthy_threshold: 3,
@@ -60,7 +62,6 @@ impl Default for HealthCheckConfig {
 
 /// Backend health status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // TODO: Remove when health checking is enabled in router
 pub enum HealthStatus {
     Healthy,
     Unhealthy,
@@ -68,7 +69,6 @@ pub enum HealthStatus {
 
 /// Health check state for a single backend
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // TODO: Remove when health checking is enabled in router
 struct BackendHealthState {
     status: HealthStatus,
     consecutive_successes: u32,
@@ -78,7 +78,6 @@ struct BackendHealthState {
 }
 
 impl BackendHealthState {
-    #[allow(dead_code)] // TODO: Remove when health checking is enabled in router
     fn new() -> Self {
         Self {
             status: HealthStatus::Healthy, // Start optimistically
@@ -90,7 +89,6 @@ impl BackendHealthState {
     }
 
     /// Record successful probe
-    #[allow(dead_code)] // TODO: Remove when health checking is enabled in router
     fn record_success(&mut self, latency_ms: u64, config: &HealthCheckConfig) {
         self.consecutive_successes += 1;
         self.consecutive_failures = 0;
@@ -104,7 +102,6 @@ impl BackendHealthState {
     }
 
     /// Record failed probe
-    #[allow(dead_code)] // TODO: Remove when health checking is enabled in router
     fn record_failure(&mut self, config: &HealthCheckConfig) {
         self.consecutive_failures += 1;
         self.consecutive_successes = 0;
@@ -118,7 +115,6 @@ impl BackendHealthState {
 }
 
 /// Active health checker with injected Prometheus metrics
-#[allow(dead_code)] // TODO: Remove when health checking is enabled in router
 pub struct HealthChecker {
     config: HealthCheckConfig,
     /// Backend health state (Backend -> HealthState)
@@ -217,7 +213,7 @@ impl HealthChecker {
     }
 
     /// Stop all health checking tasks gracefully
-    #[allow(dead_code)] // TODO: Remove when health checking is enabled in router
+    #[allow(dead_code)] // Will be used for graceful shutdown in production
     pub fn shutdown(&self) {
         info!("Shutting down health checker");
         self.cancel_token.cancel();
@@ -243,8 +239,16 @@ impl HealthChecker {
     }
 
     /// Start health checking for a list of backends
-    #[allow(dead_code)] // TODO: Remove when health checking is enabled in router
     pub fn start_checking(&self, backends: Vec<Backend>, route_name: String) {
+        // Skip if health checking is disabled
+        if !self.config.enabled {
+            debug!(
+                route = %route_name,
+                "Health checking disabled, skipping backend probes"
+            );
+            return;
+        }
+
         let states = self.states.clone();
         let config = self.config.clone();
         let cancel_token = self.cancel_token.clone();
@@ -304,7 +308,6 @@ impl HealthChecker {
 
     /// Background loop for checking a single backend
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)] // TODO: Remove when health checking is enabled in router
     async fn check_backend_loop(
         backend: Backend,
         states: Arc<RwLock<HashMap<Backend, BackendHealthState>>>,
