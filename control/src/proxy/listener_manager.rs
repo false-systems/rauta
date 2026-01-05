@@ -429,6 +429,9 @@ impl ListenerManager {
         http_client: PooledClient,
         protocol_cache: Arc<tokio::sync::RwLock<HashMap<String, HttpProtocol>>>,
     ) {
+        // Extract peer address for Maglev hashing BEFORE consuming stream
+        let peer_addr = stream.peer_addr().ok();
+
         // Peek at the first bytes to detect HTTP/2 preface (h2c)
         let mut preface_buf = [0u8; 24]; // HTTP/2 preface is exactly 24 bytes
         let is_h2c = match stream.peek(&mut preface_buf).await {
@@ -444,6 +447,7 @@ impl ListenerManager {
             let circuit_breaker = circuit_breaker.clone();
             let http_client = http_client.clone();
             let protocol_cache = protocol_cache.clone();
+            let peer_addr = peer_addr; // Capture peer_addr in closure
             async move {
                 Self::handle_request(
                     req,
@@ -452,6 +456,7 @@ impl ListenerManager {
                     circuit_breaker,
                     http_client,
                     protocol_cache,
+                    peer_addr, // Pass peer_addr to handle_request
                 )
                 .await
             }
@@ -486,6 +491,9 @@ impl ListenerManager {
         http_client: PooledClient,
         protocol_cache: Arc<tokio::sync::RwLock<HashMap<String, HttpProtocol>>>,
     ) {
+        // Extract peer address for Maglev hashing BEFORE consuming stream
+        let peer_addr = stream.peer_addr().ok();
+
         // Perform TLS handshake with ALPN negotiation
         let tls_stream = match acceptor.accept(stream).await {
             Ok(s) => s,
@@ -510,6 +518,7 @@ impl ListenerManager {
             let circuit_breaker = circuit_breaker.clone();
             let http_client = http_client.clone();
             let protocol_cache = protocol_cache.clone();
+            let peer_addr = peer_addr; // Capture peer_addr in closure
             async move {
                 Self::handle_request(
                     req,
@@ -518,6 +527,7 @@ impl ListenerManager {
                     circuit_breaker,
                     http_client,
                     protocol_cache,
+                    peer_addr, // Pass peer_addr to handle_request
                 )
                 .await
             }
@@ -562,6 +572,7 @@ impl ListenerManager {
         circuit_breaker: Arc<crate::proxy::circuit_breaker::CircuitBreakerManager>,
         http_client: PooledClient,
         protocol_cache: Arc<tokio::sync::RwLock<HashMap<String, HttpProtocol>>>,
+        peer_addr: Option<std::net::SocketAddr>,
     ) -> Result<
         Response<http_body_util::combinators::BoxBody<hyper::body::Bytes, std::io::Error>>,
         hyper::Error,
@@ -621,13 +632,18 @@ impl ListenerManager {
             }
         };
 
+        // Extract source IP and port from peer address for Maglev hashing
+        let (src_ip, src_port) = peer_addr
+            .map(|addr| (Some(addr.ip()), Some(addr.port())))
+            .unwrap_or((None, None));
+
         // Select backend using router
         let route_match = router.select_backend_with_headers(
             http_method,
             path,
             vec![("host", &host_header)],
-            None, // src_ip - TODO: extract from connection
-            None, // src_port
+            src_ip,
+            src_port,
         );
 
         let route_match = match route_match {

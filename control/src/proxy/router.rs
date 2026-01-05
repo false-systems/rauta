@@ -3357,4 +3357,127 @@ mod tests {
             );
         }
     }
+
+    // ============================================
+    // Feature: Client IP-based Maglev Distribution
+    // ============================================
+
+    #[test]
+    fn test_maglev_distribution_with_client_ips() {
+        // RED: Test that different client IPs distribute across backends
+        // This is what listener_manager should provide to Router
+
+        let router = Router::new();
+
+        // Add route with 3 backends
+        let backends = vec![
+            Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 1), 8080, 100),
+            Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 2), 8080, 100),
+            Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 3), 8080, 100),
+        ];
+
+        router
+            .add_route(HttpMethod::GET, "/api/test", backends)
+            .unwrap();
+
+        // Simulate different client IPs (what listener_manager should extract)
+        let client_ips = vec![
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(192, 168, 1, 101),
+            Ipv4Addr::new(192, 168, 1, 102),
+            Ipv4Addr::new(192, 168, 1, 103),
+            Ipv4Addr::new(192, 168, 1, 104),
+            Ipv4Addr::new(192, 168, 1, 105),
+        ];
+
+        let mut backend_distribution = std::collections::HashMap::new();
+
+        // Each client IP should get a backend via Maglev hashing
+        for client_ip in &client_ips {
+            let route_match = router
+                .select_backend(
+                    HttpMethod::GET,
+                    "/api/test",
+                    Some(std::net::IpAddr::V4(*client_ip)),
+                    Some(12345), // Source port
+                )
+                .expect("Should find backend");
+
+            let backend_ip = route_match.backend.as_ipv4().unwrap();
+            *backend_distribution.entry(backend_ip).or_insert(0) += 1;
+        }
+
+        // With 6 clients and 3 backends, should distribute across multiple backends
+        // (not all to the same backend like when IP is None)
+        assert!(
+            backend_distribution.len() > 1,
+            "Maglev should distribute across multiple backends, got distribution: {:?}",
+            backend_distribution
+        );
+
+        // Verify consistency: same client IP should always get same backend
+        let client_ip = Ipv4Addr::new(192, 168, 1, 100);
+
+        let first_backend = router
+            .select_backend(
+                HttpMethod::GET,
+                "/api/test",
+                Some(std::net::IpAddr::V4(client_ip)),
+                Some(12345),
+            )
+            .unwrap()
+            .backend;
+
+        for _ in 0..10 {
+            let backend = router
+                .select_backend(
+                    HttpMethod::GET,
+                    "/api/test",
+                    Some(std::net::IpAddr::V4(client_ip)),
+                    Some(12345),
+                )
+                .unwrap()
+                .backend;
+
+            assert_eq!(
+                backend, first_backend,
+                "Same client IP should consistently get same backend (Maglev consistency)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_maglev_degrades_gracefully_when_ip_is_none() {
+        // GREEN: Test that when IP is None (current behavior), routing still works
+        // but all requests go to same backend
+
+        let router = Router::new();
+
+        let backends = vec![
+            Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 1), 8080, 100),
+            Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 2), 8080, 100),
+            Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 3), 8080, 100),
+        ];
+
+        router
+            .add_route(HttpMethod::GET, "/api/test", backends)
+            .unwrap();
+
+        // When IP is None, should still return a backend (degraded mode)
+        let first_backend = router
+            .select_backend(HttpMethod::GET, "/api/test", None, None)
+            .expect("Should find backend even with None IP");
+
+        // All requests with None IP go to same backend (hash to 0)
+        for _ in 0..10 {
+            let backend = router
+                .select_backend(HttpMethod::GET, "/api/test", None, None)
+                .unwrap();
+
+            assert_eq!(
+                backend.backend, first_backend.backend,
+                "All None IPs should hash to same backend (degraded mode)"
+            );
+        }
+    }
 }
