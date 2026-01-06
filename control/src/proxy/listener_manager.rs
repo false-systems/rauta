@@ -447,7 +447,6 @@ impl ListenerManager {
             let circuit_breaker = circuit_breaker.clone();
             let http_client = http_client.clone();
             let protocol_cache = protocol_cache.clone();
-            let peer_addr = peer_addr; // Capture peer_addr in closure
             async move {
                 Self::handle_request(
                     req,
@@ -456,7 +455,7 @@ impl ListenerManager {
                     circuit_breaker,
                     http_client,
                     protocol_cache,
-                    peer_addr, // Pass peer_addr to handle_request
+                    peer_addr,
                 )
                 .await
             }
@@ -518,7 +517,6 @@ impl ListenerManager {
             let circuit_breaker = circuit_breaker.clone();
             let http_client = http_client.clone();
             let protocol_cache = protocol_cache.clone();
-            let peer_addr = peer_addr; // Capture peer_addr in closure
             async move {
                 Self::handle_request(
                     req,
@@ -527,7 +525,7 @@ impl ListenerManager {
                     circuit_breaker,
                     http_client,
                     protocol_cache,
-                    peer_addr, // Pass peer_addr to handle_request
+                    peer_addr,
                 )
                 .await
             }

@@ -430,7 +430,10 @@ impl Router {
     /// Used for testing and production deployments where health checking
     /// needs to be explicitly enabled or configured.
     #[allow(dead_code)] // Used by tests and main.rs
-    pub fn with_health_config(health_config: HealthCheckConfig, registry: &prometheus::Registry) -> Self {
+    pub fn with_health_config(
+        health_config: HealthCheckConfig,
+        registry: &prometheus::Registry,
+    ) -> Self {
         Self {
             routes: Arc::new(RwLock::new(HashMap::new())),
             prefix_router: Arc::new(RwLock::new(matchit::Router::new())),
@@ -3282,8 +3285,8 @@ mod tests {
 
     #[test]
     fn test_router_with_health_checking_enabled() {
-        // RED: Test that Router with enabled health checking doesn't panic
-        // and properly integrates with HealthChecker
+        // Verify that Router with enabled health checking can be created,
+        // routes added, and it integrates correctly with HealthChecker
 
         use prometheus::Registry;
 
@@ -3330,7 +3333,7 @@ mod tests {
 
     #[test]
     fn test_router_with_health_checking_disabled() {
-        // GREEN: Test that default Router has health checking disabled
+        // Verify default Router has health checking disabled
         let router = Router::new();
 
         let backends = vec![Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 1), 8080, 100)];
@@ -3364,8 +3367,8 @@ mod tests {
 
     #[test]
     fn test_maglev_distribution_with_client_ips() {
-        // RED: Test that different client IPs distribute across backends
-        // This is what listener_manager should provide to Router
+        // Test that different client IPs distribute across backends via Maglev hashing
+        // This simulates the client IP information that listener_manager provides to Router
 
         let router = Router::new();
 
