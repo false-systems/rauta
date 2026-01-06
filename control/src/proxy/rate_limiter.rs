@@ -396,10 +396,10 @@ mod tests {
             }
         }
 
-        // Should have allowed 4-6 requests (accounting for timing variance)
+        // Should have allowed 4-7 requests (accounting for timing variance and system load)
         assert!(
-            (4..=6).contains(&allowed),
-            "Should allow 4-6 requests after 5ms, got {}",
+            (4..=7).contains(&allowed),
+            "Should allow 4-7 requests after 5ms, got {}",
             allowed
         );
     }

@@ -81,6 +81,7 @@ pub struct GatewayIndexMetrics {
 #[allow(dead_code)]
 impl GatewayIndexMetrics {
     /// Create new metrics (all counters at zero)
+    #[allow(dead_code)] // Part of public API, may be used for testing or initialization
     pub fn new() -> Self {
         Self::default()
     }
@@ -211,6 +212,7 @@ pub struct GatewayIndex {
 #[allow(dead_code)]
 impl GatewayIndex {
     /// Create a new GatewayIndex for the specified GatewayClass
+    #[allow(dead_code)] // Part of public API, used for initialization
     pub fn new(gateway_class_name: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashSet::new())),
@@ -280,6 +282,7 @@ impl GatewayIndex {
     /// Check if any of the given Gateways are managed
     ///
     /// Useful for batch checking HTTPRoute parentRefs.
+    #[allow(dead_code)] // Part of public API, may be used for batch checking
     pub fn contains_any<'a>(&self, refs: impl IntoIterator<Item = (&'a str, &'a str)>) -> bool {
         let inner = safe_read(&self.inner);
         for (namespace, name) in refs {
@@ -306,6 +309,7 @@ impl GatewayIndex {
     }
 
     /// Check if the index is empty
+    #[allow(dead_code)] // Part of public API, may be used for validation
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -321,11 +325,13 @@ impl GatewayIndex {
     /// Iterate over managed Gateways
     ///
     /// Returns a snapshot - modifications during iteration won't be seen.
+    #[allow(dead_code)] // Part of public API, may be used for iteration
     pub fn iter(&self) -> impl Iterator<Item = GatewayKey> {
         self.keys().into_iter()
     }
 
     /// Get metrics reference (for testing/debugging)
+    #[allow(dead_code)] // Part of public API, used for testing and debugging
     pub fn metrics(&self) -> &GatewayIndexMetrics {
         &self.metrics
     }
