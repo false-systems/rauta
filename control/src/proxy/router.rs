@@ -3282,8 +3282,8 @@ mod tests {
 
     #[test]
     fn test_router_with_health_checking_enabled() {
-        // RED: Test that Router with enabled health checking doesn't panic
-        // and properly integrates with HealthChecker
+        // Verify that a Router with enabled health checking can be created,
+        // routes can be added, and it integrates correctly with HealthChecker.
 
         use prometheus::Registry;
 
@@ -3330,7 +3330,7 @@ mod tests {
 
     #[test]
     fn test_router_with_health_checking_disabled() {
-        // GREEN: Test that default Router has health checking disabled
+        // Verify that the default Router has health checking disabled by default.
         let router = Router::new();
 
         let backends = vec![Backend::from_ipv4(Ipv4Addr::new(10, 0, 1, 1), 8080, 100)];
@@ -3364,8 +3364,8 @@ mod tests {
 
     #[test]
     fn test_maglev_distribution_with_client_ips() {
-        // RED: Test that different client IPs distribute across backends
-        // This is what listener_manager should provide to Router
+        // Test that different client IPs distribute across backends via Maglev hashing.
+        // This simulates the client IP information that listener_manager provides to Router.
 
         let router = Router::new();
 
@@ -3448,8 +3448,8 @@ mod tests {
 
     #[test]
     fn test_maglev_degrades_gracefully_when_ip_is_none() {
-        // GREEN: Test that when IP is None (current behavior), routing still works
-        // but all requests go to same backend
+        // Verify that when the client IP is None, routing still works in degraded mode
+        // and all requests consistently go to the same backend (hash to 0).
 
         let router = Router::new();
 
