@@ -3451,8 +3451,8 @@ mod tests {
 
     #[test]
     fn test_maglev_degrades_gracefully_when_ip_is_none() {
-        // GREEN: Test that when IP is None (current behavior), routing still works
-        // but all requests go to same backend
+        // Verify that when client IP is None, routing still works in degraded mode
+        // and all requests consistently go to the same backend (hash to 0)
 
         let router = Router::new();
 
