@@ -2,13 +2,28 @@
 //!
 //! Run with: cargo test --test integration_test
 
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::needless_borrows_for_generic_args,
+    clippy::to_string_in_format_args,
+    clippy::map_clone
+)]
+
 mod integration;
 
-use integration::{TestConfig, TestContext, TestScenario};
 use integration::scenarios::tls_validation::TlsValidationScenario;
+use integration::{TestConfig, TestContext, TestScenario};
 
 #[tokio::test]
+#[ignore] // Requires Kubernetes cluster with Gateway API CRDs - run with `cargo test -- --ignored`
 async fn run_integration_tests() {
+    // Initialize rustls crypto provider (required for kube client TLS)
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     // Load configuration
     let config = TestConfig::load().expect("Failed to load test config");
 

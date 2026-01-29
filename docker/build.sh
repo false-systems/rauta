@@ -2,10 +2,7 @@
 #
 # Build RAUTA in Docker
 #
-# This script builds the RAUTA Docker image with all components:
-# - BPF program (rauta.bpf)
-# - Control plane (rauta-control)
-# - CLI (rautactl)
+# This script builds the RAUTA Docker image with the control plane.
 
 set -e
 
@@ -25,11 +22,9 @@ echo ""
 echo "Image: rauta:latest"
 echo ""
 echo "Built components:"
-echo "  - BPF program:    /home/rauta/bpf/rauta"
 echo "  - Control plane:  /home/rauta/bin/rauta-control"
-echo "  - CLI:            /home/rauta/bin/rautactl"
 echo ""
 echo "Next steps:"
 echo "  1. Run tests:     ./docker/test.sh"
 echo "  2. Start stack:   docker-compose up"
-echo "  3. Interactive:   docker run -it --privileged rauta:latest"
+echo "  3. Interactive:   docker run -it rauta:latest"

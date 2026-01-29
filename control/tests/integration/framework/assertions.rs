@@ -17,10 +17,7 @@ pub async fn assert_listener_resolved_refs(
     let gateways: Api<Gateway> = Api::namespaced(client.clone(), namespace);
     let gateway = gateways.get(gateway_name).await?;
 
-    let status = gateway
-        .status
-        .as_ref()
-        .ok_or("Gateway has no status")?;
+    let status = gateway.status.as_ref().ok_or("Gateway has no status")?;
 
     let listeners = status
         .listeners
@@ -29,7 +26,7 @@ pub async fn assert_listener_resolved_refs(
 
     let listener = listeners
         .iter()
-        .find(|l| l.name.as_ref() == Some(&listener_name.to_string()))
+        .find(|l| l.name == listener_name)
         .ok_or(format!("Listener {} not found", listener_name))?;
 
     // Parse listener JSON to access conditions
@@ -85,10 +82,7 @@ pub async fn assert_listener_message_contains(
     let gateways: Api<Gateway> = Api::namespaced(client.clone(), namespace);
     let gateway = gateways.get(gateway_name).await?;
 
-    let status = gateway
-        .status
-        .as_ref()
-        .ok_or("Gateway has no status")?;
+    let status = gateway.status.as_ref().ok_or("Gateway has no status")?;
 
     let listeners = status
         .listeners
@@ -97,7 +91,7 @@ pub async fn assert_listener_message_contains(
 
     let listener = listeners
         .iter()
-        .find(|l| l.name.as_ref() == Some(&listener_name.to_string()))
+        .find(|l| l.name == listener_name)
         .ok_or(format!("Listener {} not found", listener_name))?;
 
     let listener_json = serde_json::to_value(listener)?;

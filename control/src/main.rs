@@ -3,7 +3,7 @@ use common::{Backend, HttpMethod};
 use proxy::router::Router;
 use proxy::server::ProxyServer;
 use std::env;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info, warn};
@@ -366,16 +366,21 @@ fn add_example_routes(router: &Arc<Router>) -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid backend port {}: {}", port_str, e))?;
 
-    // Parse IPv4 address (strip brackets if present for IPv6 format)
+    // Parse IP address (strip brackets if present for IPv6 format)
+    // Supports both IPv4 (127.0.0.1) and IPv6 ([::1] or ::1)
     let ip_str = ip_str.trim_start_matches('[').trim_end_matches(']');
-    let ip: Ipv4Addr = ip_str
+    let ip: IpAddr = ip_str
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid backend IP {}: {}", ip_str, e))?;
 
     info!("   Backend: {}:{}", ip, port);
 
     // Route all paths to configured backend
-    let backends = vec![Backend::new(u32::from(ip), port, 100)];
+    let backend = match ip {
+        IpAddr::V4(ipv4) => Backend::from_ipv4(ipv4, port, 100),
+        IpAddr::V6(ipv6) => Backend::from_ipv6(ipv6, port, 100),
+    };
+    let backends = vec![backend];
 
     router
         .add_route(HttpMethod::GET, "/", backends)

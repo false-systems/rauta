@@ -1,10 +1,12 @@
+#![allow(clippy::map_clone)]
 //! EndpointSlice Dynamic Backend Discovery Test
 //!
 //! Validates that RAUTA detects backend changes via EndpointSlice watching.
 
-use crate::framework::{TestContext, TestResult};
-use crate::framework::{fixtures, k8s};
-use crate::{TestConfig, TestScenario};
+use crate::integration::framework::{fixtures, k8s};
+use crate::integration::framework::{TestContext, TestResult};
+use crate::integration::{TestConfig, TestScenario};
+use async_trait::async_trait;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, ListParams, Patch, PatchParams};
@@ -12,6 +14,7 @@ use std::time::Duration;
 
 pub struct EndpointSliceScenario;
 
+#[async_trait]
 impl TestScenario for EndpointSliceScenario {
     fn name(&self) -> &str {
         "endpointslice_updates"
@@ -59,18 +62,17 @@ async fn test_scale_up(ctx: &TestContext) -> TestResult {
     println!("  ✅ Scaled: 3 pods ready");
 
     // Wait for EndpointSlice reconciliation (5 min periodic in RAUTA)
-    println!("  ⏳ Waiting for EndpointSlice reconciliation (up to {} secs)...", ctx.timeouts.reconciliation);
+    println!(
+        "  ⏳ Waiting for EndpointSlice reconciliation (up to {} secs)...",
+        ctx.timeouts.reconciliation
+    );
     tokio::time::sleep(Duration::from_secs(ctx.timeouts.reconciliation)).await;
 
     // TODO: Verify RAUTA sees 3 backends
     // For now, just verify pods are running
     let pod_ips = get_pod_ips(ctx, "scale-backend").await?;
     if pod_ips.len() != 3 {
-        return Err(format!(
-            "Expected 3 pod IPs after scale-up, got {}",
-            pod_ips.len()
-        )
-        .into());
+        return Err(format!("Expected 3 pod IPs after scale-up, got {}", pod_ips.len()).into());
     }
 
     println!("  ✅ Scale up detected: {} pod IPs", pod_ips.len());
@@ -99,11 +101,7 @@ async fn test_scale_down(ctx: &TestContext) -> TestResult {
     // Verify only 1 pod IP
     let pod_ips = get_pod_ips(ctx, "scale-backend").await?;
     if pod_ips.len() != 1 {
-        return Err(format!(
-            "Expected 1 pod IP after scale-down, got {}",
-            pod_ips.len()
-        )
-        .into());
+        return Err(format!("Expected 1 pod IP after scale-down, got {}", pod_ips.len()).into());
     }
 
     println!("  ✅ Scale down detected: {} pod IP", pod_ips.len());
@@ -133,9 +131,9 @@ async fn wait_for_pod_count(
                     .as_ref()
                     .and_then(|s| s.conditions.as_ref())
                     .map(|conditions| {
-                        conditions.iter().any(|c| {
-                            c.type_ == "Ready" && c.status == "True"
-                        })
+                        conditions
+                            .iter()
+                            .any(|c| c.type_ == "Ready" && c.status == "True")
                     })
                     .unwrap_or(false)
             })
@@ -156,11 +154,7 @@ async fn wait_for_pod_count(
 }
 
 /// Helper: Scale deployment
-async fn scale_deployment(
-    ctx: &TestContext,
-    name: &str,
-    replicas: i32,
-) -> TestResult {
+async fn scale_deployment(ctx: &TestContext, name: &str, replicas: i32) -> TestResult {
     let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ctx.namespace);
 
     let patch = serde_json::json!({
@@ -170,18 +164,17 @@ async fn scale_deployment(
     });
 
     deployments
-        .patch(
-            name,
-            &PatchParams::default(),
-            &Patch::Strategic(patch),
-        )
+        .patch(name, &PatchParams::default(), &Patch::Strategic(patch))
         .await?;
 
     Ok(())
 }
 
 /// Helper: Get Pod IPs
-async fn get_pod_ips(ctx: &TestContext, app_label: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+async fn get_pod_ips(
+    ctx: &TestContext,
+    app_label: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ctx.namespace);
     let lp = ListParams::default().labels(&format!("app={}", app_label));
     let pod_list = pods.list(&lp).await?;
