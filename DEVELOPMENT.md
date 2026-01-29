@@ -272,7 +272,7 @@ A: Should work with WSL2. Not tested on native Windows.
 
 ## Next Steps
 
-1. **Run setup**: `./scripts/setup.sh`
+1. **Install Rust**: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 2. **Build project**: `cargo build -p control`
 3. **Run tests**: `cargo test`
 4. **Start developing**: Edit → Build → Test

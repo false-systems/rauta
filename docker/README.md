@@ -184,9 +184,9 @@ sudo docker-compose up
 docker/
 ├── README.md              # This file
 ├── build.sh               # Build RAUTA image
-├── build-quick.sh         # Quick build test (fast iteration)
 ├── test.sh                # Run integration tests
 ├── Dockerfile.prod        # Production multi-stage build
+├── Dockerfile.simple      # Lightweight single-stage build
 ├── docker-compose.yml     # Development compose
 └── docker-compose.prod.yml # Production compose (full stack)
 ```

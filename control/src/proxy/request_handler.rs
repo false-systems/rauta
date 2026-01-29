@@ -910,7 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn test_healthz_endpoint_returns_ok_body() {
+    fn test_healthz_endpoint_content_type() {
         let response = serve_healthz_endpoint().unwrap();
         let content_type = response
             .headers()
@@ -922,19 +922,25 @@ mod tests {
     }
 
     #[test]
+    fn test_healthz_endpoint_body() {
+        use http_body_util::BodyExt;
+
+        let response = serve_healthz_endpoint().unwrap();
+        let body = response.into_body();
+        let collected = futures::executor::block_on(body.collect()).unwrap();
+        let bytes = collected.to_bytes();
+        assert_eq!(&bytes[..], b"ok");
+    }
+
+    #[test]
     fn test_healthz_endpoint_is_lightweight() {
-        // Verify the endpoint doesn't do expensive operations
-        // by checking it returns quickly (under 1ms)
-        let start = std::time::Instant::now();
+        // Verify the endpoint doesn't do expensive operations by ensuring
+        // it can be called many times without panicking or failing.
+        // NOTE: Avoid wall-clock timing assertions to prevent flaky tests
+        // on shared or slow CI runners.
         for _ in 0..1000 {
-            let _ = serve_healthz_endpoint();
+            let response = serve_healthz_endpoint().expect("healthz endpoint failed");
+            assert_eq!(response.status(), StatusCode::OK);
         }
-        let elapsed = start.elapsed();
-        // 1000 calls should complete in under 10ms
-        assert!(
-            elapsed.as_millis() < 10,
-            "healthz endpoint too slow: {:?}",
-            elapsed
-        );
     }
 }
