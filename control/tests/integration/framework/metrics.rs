@@ -26,10 +26,7 @@ impl MetricsCollector {
     }
 
     /// Scrape metrics from RAUTA /metrics endpoint
-    pub async fn scrape(
-        &mut self,
-        endpoint: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn scrape(&mut self, endpoint: &str) -> Result<(), Box<dyn std::error::Error>> {
         let response = reqwest::get(endpoint).await?;
         let body = response.text().await?;
 
@@ -85,7 +82,8 @@ impl MetricsCollector {
                 }
             }
 
-            if line.starts_with("rauta_request_duration_seconds") && line.contains("quantile=\"0.99\"")
+            if line.starts_with("rauta_request_duration_seconds")
+                && line.contains("quantile=\"0.99\"")
             {
                 if let Some(value_str) = line.split_whitespace().nth(1) {
                     if let Ok(value) = value_str.parse::<f64>() {

@@ -10,9 +10,6 @@ Quick setup for building and testing RAUTA on any platform (macOS, Windows, Linu
 
 # Run integration tests
 ./docker/test.sh
-
-# Run performance benchmarks
-./docker/benchmark.sh
 ```
 
 ## Architecture
@@ -173,41 +170,27 @@ sudo docker-compose up
 
 ## Performance Expectations
 
-### Docker (SKB Mode)
+### Docker
 - Throughput: 50-100k req/s
 - Latency p99: 1-5ms
-- **Note**: Slower than native XDP due to SKB mode and container overhead
 
-### Native Linux (Driver Mode)
-- Throughput: 1M+ req/s
-- Latency p99: <100μs
-- **Note**: Requires bare metal Linux with XDP-capable NIC
-
-## Next Steps
-
-After validating in Docker:
-1. Deploy to bare metal Linux for performance testing
-2. Use native XDP mode (not SKB)
-3. Benchmark with bpftrace for <10μs latency
-4. Profile with perf for optimization
+### Native Linux
+- Throughput: 100-200k req/s
+- Latency p99: <1ms
 
 ## Files
 
 ```
 docker/
-├── README.md          # This file
+├── README.md              # This file
 ├── build.sh               # Build RAUTA image
 ├── build-quick.sh         # Quick build test (fast iteration)
 ├── test.sh                # Run integration tests
-├── benchmark.sh           # Performance benchmarks
-├── Dockerfile.dev         # Development environment
 ├── Dockerfile.prod        # Production multi-stage build
-├── docker-compose.yml     # Development compose (dev container)
+├── docker-compose.yml     # Development compose
 └── docker-compose.prod.yml # Production compose (full stack)
 ```
 
 ## References
 
-- [Docker XDP limitations](https://github.com/cilium/cilium/issues/504)
-- [XDP SKB vs Native mode](https://lwn.net/Articles/825998/)
 - [wrk HTTP benchmarking tool](https://github.com/wg/wrk)

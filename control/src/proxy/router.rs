@@ -430,7 +430,10 @@ impl Router {
     /// Used for testing and production deployments where health checking
     /// needs to be explicitly enabled or configured.
     #[allow(dead_code)] // Used by tests and main.rs
-    pub fn with_health_config(health_config: HealthCheckConfig, registry: &prometheus::Registry) -> Self {
+    pub fn with_health_config(
+        health_config: HealthCheckConfig,
+        registry: &prometheus::Registry,
+    ) -> Self {
         Self {
             routes: Arc::new(RwLock::new(HashMap::new())),
             prefix_router: Arc::new(RwLock::new(matchit::Router::new())),

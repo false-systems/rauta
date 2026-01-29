@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_imports)]
 //! RAUTA Integration Test Framework
 //!
 //! A comprehensive testing framework for validating Gateway API implementation,
@@ -32,10 +33,11 @@
 //! - Configure performance testing
 //! - Enable network sniffing
 
-mod framework;
-mod scenarios;
+pub mod framework;
+pub mod scenarios;
 
-use framework::{TestContext, TestResult};
+use async_trait::async_trait;
+pub use framework::{TestContext, TestResult};
 use serde::Deserialize;
 use std::fs;
 
@@ -65,7 +67,7 @@ pub struct ScenarioConfig {
     pub load_testing: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TimeoutConfig {
     pub gateway_ready: u64,
     pub route_ready: u64,
@@ -93,7 +95,14 @@ pub struct SnifferConfig {
 impl TestConfig {
     /// Load configuration from config.toml
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let config_path = "tests/integration/config.toml";
+        // Try control/tests path first (when running from workspace root)
+        // Fall back to tests path (when running from control crate)
+        let config_path = if std::path::Path::new("control/tests/integration/config.toml").exists()
+        {
+            "control/tests/integration/config.toml"
+        } else {
+            "tests/integration/config.toml"
+        };
         let contents = fs::read_to_string(config_path)?;
         let config: TestConfig = toml::from_str(&contents)?;
         Ok(config)
@@ -103,7 +112,8 @@ impl TestConfig {
 /// Test scenario trait
 ///
 /// Each test scenario implements this trait to integrate with the framework.
-pub trait TestScenario {
+#[async_trait]
+pub trait TestScenario: Send + Sync {
     /// Scenario name (for logging and filtering)
     fn name(&self) -> &str;
 

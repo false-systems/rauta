@@ -1,15 +1,18 @@
+#![allow(clippy::needless_borrows_for_generic_args)]
 //! Load Testing and Performance Validation
 //!
 //! Runs load tests using wrk and validates performance metrics.
 
-use crate::framework::{TestContext, TestResult};
-use crate::framework::{assertions, fixtures, k8s};
-use crate::{TestConfig, TestScenario};
+use crate::integration::framework::{assertions, fixtures, k8s};
+use crate::integration::framework::{TestContext, TestResult};
+use crate::integration::{TestConfig, TestScenario};
+use async_trait::async_trait;
 use std::process::Command;
 use std::time::Duration;
 
 pub struct LoadTestScenario;
 
+#[async_trait]
 impl TestScenario for LoadTestScenario {
     fn name(&self) -> &str {
         "load_testing"
@@ -34,7 +37,7 @@ impl TestScenario for LoadTestScenario {
 }
 
 /// Test 1: Baseline performance (low load)
-async fn test_baseline_performance(ctx: &TestContext) -> TestResult {
+async fn test_baseline_performance(ctx: &mut TestContext) -> TestResult {
     println!("  📝 Test: Baseline Performance");
 
     // Deploy backend
@@ -87,8 +90,14 @@ async fn test_baseline_performance(ctx: &TestContext) -> TestResult {
     // Analyze results
     if let Some(delta) = ctx.metrics.get_delta() {
         println!("  📈 Baseline results:");
-        println!("      Requests: {:?}", delta.requests_delta.values().sum::<u64>());
-        println!("      p99 latency delta: {:.3}ms", delta.duration_p99_delta * 1000.0);
+        println!(
+            "      Requests: {:?}",
+            delta.requests_delta.values().sum::<u64>()
+        );
+        println!(
+            "      p99 latency delta: {:.3}ms",
+            delta.duration_p99_delta * 1000.0
+        );
     }
 
     println!("  ✅ Baseline performance captured");
@@ -97,7 +106,7 @@ async fn test_baseline_performance(ctx: &TestContext) -> TestResult {
 }
 
 /// Test 2: Sustained high load
-async fn test_sustained_load(ctx: &TestContext) -> TestResult {
+async fn test_sustained_load(ctx: &mut TestContext) -> TestResult {
     println!("  📝 Test: Sustained Load (30s, 400 connections)");
 
     let endpoint = get_rauta_endpoint(ctx).await?;
@@ -169,11 +178,7 @@ fn run_wrk(
         .output()?;
 
     if !output.status.success() {
-        return Err(format!(
-            "wrk failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
+        return Err(format!("wrk failed: {}", String::from_utf8_lossy(&output.stderr)).into());
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -229,11 +234,7 @@ async fn get_rauta_endpoint(ctx: &TestContext) -> Result<String, Box<dyn std::er
 }
 
 /// Helper: Wait for pods to be ready
-async fn wait_for_ready_pods(
-    ctx: &TestContext,
-    app_label: &str,
-    count: usize,
-) -> TestResult {
+async fn wait_for_ready_pods(ctx: &TestContext, app_label: &str, count: usize) -> TestResult {
     use k8s_openapi::api::core::v1::Pod;
     use kube::api::{Api, ListParams};
 
@@ -251,7 +252,10 @@ async fn wait_for_ready_pods(
                 pod.status
                     .as_ref()
                     .and_then(|s| s.conditions.as_ref())
-                    .map(|c| c.iter().any(|cond| cond.type_ == "Ready" && cond.status == "True"))
+                    .map(|c| {
+                        c.iter()
+                            .any(|cond| cond.type_ == "Ready" && cond.status == "True")
+                    })
                     .unwrap_or(false)
             })
             .count();

@@ -43,11 +43,6 @@ fn test_parser_contract_method_with_length() {
 
         // Verify length matches
         assert_eq!(method.len() as usize, expected_len);
-
-        // This is what BPF should do:
-        // let (parsed_method, parsed_len) = parse_http_method(input)?;
-        // assert_eq!(parsed_method, method);
-        // assert_eq!(parsed_len, expected_len);
     }
 }
 

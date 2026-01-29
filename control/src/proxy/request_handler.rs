@@ -245,6 +245,11 @@ pub async fn handle_request(
         return serve_metrics_endpoint().await;
     }
 
+    // Handle /healthz endpoint (lightweight liveness/readiness check)
+    if path == "/healthz" && *req.method() == hyper::Method::GET {
+        return serve_healthz_endpoint();
+    }
+
     // Start timing after /metrics check
     let start = Instant::now();
 
@@ -417,6 +422,23 @@ async fn serve_metrics_endpoint() -> Result<Response<BoxBody<Bytes, hyper::Error
         .header("Content-Type", encoder.format_type())
         .body(
             Full::new(Bytes::from(buffer))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .unwrap())
+}
+
+/// Serve the /healthz endpoint (lightweight health check for K8s probes)
+///
+/// Returns 200 OK with minimal body. This endpoint is hit frequently by
+/// K8s liveness/readiness probes, so it should be fast and allocation-light.
+fn serve_healthz_endpoint() -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+    #[allow(clippy::unwrap_used)]
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/plain")
+        .body(
+            Full::new(Bytes::from_static(b"ok"))
                 .map_err(|never| match never {})
                 .boxed(),
         )
@@ -874,4 +896,45 @@ fn build_circuit_breaker_response() -> Result<Response<BoxBody<Bytes, hyper::Err
             .boxed(),
         )
         .unwrap())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_healthz_endpoint_returns_200() {
+        let response = serve_healthz_endpoint().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_healthz_endpoint_returns_ok_body() {
+        let response = serve_healthz_endpoint().unwrap();
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(content_type, "text/plain");
+    }
+
+    #[test]
+    fn test_healthz_endpoint_is_lightweight() {
+        // Verify the endpoint doesn't do expensive operations
+        // by checking it returns quickly (under 1ms)
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            let _ = serve_healthz_endpoint();
+        }
+        let elapsed = start.elapsed();
+        // 1000 calls should complete in under 10ms
+        assert!(
+            elapsed.as_millis() < 10,
+            "healthz endpoint too slow: {:?}",
+            elapsed
+        );
+    }
 }

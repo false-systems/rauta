@@ -360,9 +360,9 @@ Gateway API is the modern Kubernetes standard (v1 as of Oct 2023). It's more exp
 
 Consistent hashing keeps connections sticky to the same backend. When backends change, only ~1/N connections get redistributed. Maglev is Google's algorithm - O(1) lookup and proven at scale.
 
-**Why userspace L7 (not eBPF)?**
+**Why userspace L7?**
 
-HTTP/2 and TLS require TCP reassembly which XDP can't do. Even Cilium uses Envoy for L7. eBPF is great for L3/L4, but L7 belongs in userspace.
+HTTP/2 and TLS require TCP reassembly which can only be done in userspace. L7 proxying needs full protocol understanding.
 
 **Why Rust?**
 

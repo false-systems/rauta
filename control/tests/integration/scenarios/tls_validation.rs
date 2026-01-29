@@ -2,12 +2,14 @@
 //!
 //! Tests Gateway API TLS certificateRef validation according to spec.
 
-use crate::framework::{TestContext, TestResult};
-use crate::framework::{assertions, fixtures, k8s};
-use crate::{TestConfig, TestScenario};
+use crate::integration::framework::{assertions, fixtures, k8s};
+use crate::integration::framework::{TestContext, TestResult};
+use crate::integration::{TestConfig, TestScenario};
+use async_trait::async_trait;
 
 pub struct TlsValidationScenario;
 
+#[async_trait]
 impl TestScenario for TlsValidationScenario {
     fn name(&self) -> &str {
         "tls_validation"
@@ -45,7 +47,8 @@ async fn test_valid_tls_secret(ctx: &TestContext) -> TestResult {
     k8s::create_tls_secret(&ctx.client, &ctx.namespace, "valid-cert", &cert, &key).await?;
 
     // Create Gateway referencing valid Secret
-    let gateway_yaml = fixtures::gateway_with_https("test-gateway-valid", &ctx.namespace, "valid-cert");
+    let gateway_yaml =
+        fixtures::gateway_with_https("test-gateway-valid", &ctx.namespace, "valid-cert");
     k8s::apply_yaml(&ctx.client, &gateway_yaml).await?;
 
     // Wait for Gateway to be accepted
@@ -77,8 +80,11 @@ async fn test_nonexistent_secret(ctx: &TestContext) -> TestResult {
     println!("  📝 Test: Nonexistent TLS Secret");
 
     // Create Gateway referencing nonexistent Secret
-    let gateway_yaml =
-        fixtures::gateway_with_https("test-gateway-notfound", &ctx.namespace, "nonexistent-secret");
+    let gateway_yaml = fixtures::gateway_with_https(
+        "test-gateway-notfound",
+        &ctx.namespace,
+        "nonexistent-secret",
+    );
     k8s::apply_yaml(&ctx.client, &gateway_yaml).await?;
 
     // Wait for Gateway to be processed

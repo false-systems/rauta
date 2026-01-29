@@ -31,28 +31,14 @@ updates:
         update-types:
           - "patch"
 
-      # eBPF stack - Only patch updates auto-grouped
-      # Major/minor need manual review due to verifier compatibility
-      ebpf-stack:
+      # HTTP/networking stack
+      http-stack:
         patterns:
-          - "aya"
-          - "aya-ebpf"
-          - "aya-log"
-          - "aya-log-ebpf"
+          - "hyper*"
+          - "tokio*"
+          - "rustls*"
         update-types:
           - "patch"
-
-    # Ignore major/minor updates for critical eBPF dependencies
-    # These require manual review and verifier testing
-    ignore:
-      - dependency-name: "aya"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
-      - dependency-name: "aya-ebpf"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
-      - dependency-name: "aya-log"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
-      - dependency-name: "aya-log-ebpf"
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
     labels:
       - "dependencies"
@@ -63,7 +49,7 @@ updates:
       include: "scope"
 
     reviewers:
-      - "yair"  # Replace with actual GitHub username
+      - "yair"
 
   # GitHub Actions - Monthly updates
   - package-ecosystem: "github-actions"

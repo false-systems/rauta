@@ -77,7 +77,7 @@ Client → Listener → Router → Filters → Forwarder → Backend
 
 ### Key Design Decisions
 
-1. **Userspace L7** - HTTP/2 and TLS require TCP reassembly (XDP can't do this)
+1. **Userspace L7** - HTTP/2 and TLS require TCP reassembly
 2. **Maglev hashing** - O(1) lookup, ~1/N disruption on backend changes
 3. **Gateway API** - Modern K8s standard, not legacy Ingress
 4. **Safe lock helpers** - Recover from RwLock poisoning instead of cascading panics
