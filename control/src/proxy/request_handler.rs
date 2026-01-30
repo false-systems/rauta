@@ -18,11 +18,15 @@ use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
+use once_cell::sync::Lazy;
 use prometheus::{Encoder, TextEncoder};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// Server start time for uptime calculation
+static START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
 /// Worker selector for round-robin distribution
 pub struct WorkerSelector {
@@ -250,6 +254,11 @@ pub async fn handle_request(
         return serve_healthz_endpoint();
     }
 
+    // Handle /status endpoint (JSON status for operators)
+    if path == "/status" && *req.method() == hyper::Method::GET {
+        return serve_status_endpoint(&router);
+    }
+
     // Start timing after /metrics check
     let start = Instant::now();
 
@@ -439,6 +448,36 @@ fn serve_healthz_endpoint() -> Result<Response<BoxBody<Bytes, hyper::Error>>, St
         .header("Content-Type", "text/plain")
         .body(
             Full::new(Bytes::from_static(b"ok"))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .unwrap())
+}
+
+/// Serve the /status endpoint (JSON status for operators)
+///
+/// Returns a JSON object with operational status:
+/// - status: "ok" if healthy
+/// - uptime_seconds: time since server start
+/// - routes: number of configured routes
+fn serve_status_endpoint(
+    router: &Router,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+    let uptime = START_TIME.elapsed().as_secs();
+    let routes = router.route_count();
+
+    // Build JSON response (manual to avoid serde dependency for this simple case)
+    let json = format!(
+        r#"{{"status":"ok","uptime_seconds":{},"routes":{}}}"#,
+        uptime, routes
+    );
+
+    #[allow(clippy::unwrap_used)]
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(
+            Full::new(Bytes::from(json))
                 .map_err(|never| match never {})
                 .boxed(),
         )
@@ -942,5 +981,67 @@ mod tests {
             let response = serve_healthz_endpoint().expect("healthz endpoint failed");
             assert_eq!(response.status(), StatusCode::OK);
         }
+    }
+
+    #[test]
+    fn test_status_endpoint_returns_200() {
+        let router = crate::proxy::router::Router::new();
+        let response = serve_status_endpoint(&router).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_status_endpoint_content_type() {
+        let router = crate::proxy::router::Router::new();
+        let response = serve_status_endpoint(&router).unwrap();
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(content_type, "application/json");
+    }
+
+    #[test]
+    fn test_status_endpoint_body_is_valid_json() {
+        use http_body_util::BodyExt;
+
+        let router = crate::proxy::router::Router::new();
+        let response = serve_status_endpoint(&router).unwrap();
+        let body = response.into_body();
+        let collected = futures::executor::block_on(body.collect()).unwrap();
+        let bytes = collected.to_bytes();
+        let json_str = std::str::from_utf8(&bytes).unwrap();
+
+        // Verify it's valid JSON with expected fields
+        assert!(json_str.contains(r#""status":"ok""#));
+        assert!(json_str.contains(r#""uptime_seconds":"#));
+        assert!(json_str.contains(r#""routes":"#));
+    }
+
+    #[test]
+    fn test_status_endpoint_route_count() {
+        use http_body_util::BodyExt;
+
+        let router = crate::proxy::router::Router::new();
+
+        // Add a route (127.0.0.1 = 0x7f000001)
+        router
+            .add_route(
+                common::HttpMethod::GET,
+                "/test",
+                vec![common::Backend::new(0x7f000001, 8080, 100)],
+            )
+            .unwrap();
+
+        let response = serve_status_endpoint(&router).unwrap();
+        let body = response.into_body();
+        let collected = futures::executor::block_on(body.collect()).unwrap();
+        let bytes = collected.to_bytes();
+        let json_str = std::str::from_utf8(&bytes).unwrap();
+
+        // Should show 1 route
+        assert!(json_str.contains(r#""routes":1"#));
     }
 }

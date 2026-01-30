@@ -463,6 +463,14 @@ impl Router {
         cache.size()
     }
 
+    /// Get number of configured routes
+    ///
+    /// Returns the total number of routes currently registered.
+    pub fn route_count(&self) -> usize {
+        let routes = safe_read(&self.routes);
+        routes.len()
+    }
+
     /// Add or update route with backends (idempotent)
     ///
     /// If the route already exists with the same backends, this is a no-op.
