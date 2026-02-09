@@ -24,7 +24,7 @@ Pre-built Grafana dashboard for monitoring RAUTA.
 - **Connection Failures** - Failure rate per backend
 
 ### Rate Limiting
-- **Rate Limit Decisions** - Allowed vs denied requests
+- **Rate Limit Decisions** - Allowed vs rejected requests
 - **Tokens Available** - Current bucket tokens per route
 
 ### Workers
@@ -63,7 +63,7 @@ scrape_configs:
 |--------|------|-------------|
 | `http_requests_total` | Counter | Total requests (by method, path, status, worker) |
 | `http_request_duration_seconds` | Histogram | Latency distribution |
-| `circuit_breaker_state` | Gauge | 0=Closed, 1=Open, 2=Half-Open |
-| `backend_health_status` | Gauge | 0=Unhealthy, 1=Healthy |
-| `rate_limit_requests_total` | Counter | Rate limit decisions |
-| `pool_connections_active` | Gauge | Active backend connections |
+| `rauta_circuit_breaker_state` | Gauge | 0=Closed, 1=Open, 2=Half-Open |
+| `rauta_backend_health_status` | Gauge | 0=Unhealthy, 1=Healthy |
+| `rauta_rate_limit_requests_total` | Counter | Rate limit decisions |
+| `http2_pool_connections_active` | Gauge | Active backend connections |
