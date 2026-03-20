@@ -275,14 +275,14 @@ fn state_to_u64(state: CircuitState) -> u64 {
 ///
 /// All mutable state is packed into a single `AtomicU64`. State transitions use
 /// CAS (compare-and-swap) loops to ensure correctness without locks.
-/// A separate `AtomicU64` stores the last failure timestamp as epoch milliseconds.
+/// A separate `AtomicU64` stores the last failure timestamp as microseconds since creation.
 #[derive(Debug)]
 pub struct CircuitBreaker {
     /// Packed state: [63:62] state, [47:32] failures, [31:16] successes, [15:0] half_open_reqs
     packed: AtomicU64,
-    /// Last failure time as milliseconds since breaker creation (separate atomic for timestamp)
-    last_failure_ms: AtomicU64,
-    /// When this breaker was created (reference point for last_failure_ms)
+    /// Last failure time as microseconds since breaker creation (+1 to distinguish from "never failed")
+    last_failure_us: AtomicU64,
+    /// When this breaker was created (reference point for last_failure_us)
     created_at: Instant,
     /// Failure threshold (consecutive failures to trip)
     failure_threshold: u32,
@@ -301,7 +301,7 @@ impl CircuitBreaker {
     pub fn new(failure_threshold: u32, timeout: Duration) -> Self {
         Self {
             packed: AtomicU64::new(pack_state(STATE_CLOSED, 0, 0, 0)),
-            last_failure_ms: AtomicU64::new(0),
+            last_failure_us: AtomicU64::new(0),
             created_at: Instant::now(),
             failure_threshold,
             timeout,
@@ -409,7 +409,7 @@ impl CircuitBreaker {
                             .is_ok()
                         {
                             // Clear last failure time
-                            self.last_failure_ms.store(0, Ordering::Release);
+                            self.last_failure_us.store(0, Ordering::Release);
                             return;
                         }
                     } else {
@@ -439,7 +439,7 @@ impl CircuitBreaker {
     pub fn record_failure(&self) {
         // Update last failure time (use micros for sub-millisecond precision, +1 to distinguish from "never failed")
         let elapsed_us = self.created_at.elapsed().as_micros() as u64 + 1;
-        self.last_failure_ms.store(elapsed_us, Ordering::Release);
+        self.last_failure_us.store(elapsed_us, Ordering::Release);
 
         loop {
             let current = self.packed.load(Ordering::Acquire);
@@ -516,7 +516,7 @@ impl CircuitBreaker {
 
     /// Check if circuit should attempt reset (Open → Half-Open)
     fn should_attempt_reset(&self) -> bool {
-        let last_failure_us = self.last_failure_ms.load(Ordering::Acquire);
+        let last_failure_us = self.last_failure_us.load(Ordering::Acquire);
         if last_failure_us == 0 {
             return false;
         }
@@ -537,7 +537,7 @@ impl CircuitBreaker {
     pub fn reset(&self) {
         self.packed
             .store(pack_state(STATE_CLOSED, 0, 0, 0), Ordering::Release);
-        self.last_failure_ms.store(0, Ordering::Release);
+        self.last_failure_us.store(0, Ordering::Release);
     }
 }
 

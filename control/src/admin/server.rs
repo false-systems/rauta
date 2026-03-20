@@ -92,12 +92,12 @@ async fn handle_status(query: &LocalGatewayQuery) -> Response<BoxBody<Bytes, hyp
             Ok(json) => json_response(StatusCode::OK, &json),
             Err(e) => json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!(r#"{{"error":"serialization failed: {}"}}"#, e),
+                &serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string(),
             ),
         },
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!(r#"{{"error":"{}"}}"#, e),
+            &serde_json::json!({"error": e.to_string()}).to_string(),
         ),
     }
 }
@@ -108,12 +108,12 @@ async fn handle_list_routes(query: &LocalGatewayQuery) -> Response<BoxBody<Bytes
             Ok(json) => json_response(StatusCode::OK, &json),
             Err(e) => json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!(r#"{{"error":"serialization failed: {}"}}"#, e),
+                &serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string(),
             ),
         },
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!(r#"{{"error":"{}"}}"#, e),
+            &serde_json::json!({"error": e.to_string()}).to_string(),
         ),
     }
 }
@@ -124,12 +124,12 @@ async fn handle_cache_stats(query: &LocalGatewayQuery) -> Response<BoxBody<Bytes
             Ok(json) => json_response(StatusCode::OK, &json),
             Err(e) => json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!(r#"{{"error":"serialization failed: {}"}}"#, e),
+                &serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string(),
             ),
         },
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!(r#"{{"error":"{}"}}"#, e),
+            &serde_json::json!({"error": e.to_string()}).to_string(),
         ),
     }
 }
@@ -143,12 +143,12 @@ async fn handle_diagnose(
             Ok(json) => json_response(StatusCode::OK, &json),
             Err(e) => json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!(r#"{{"error":"serialization failed: {}"}}"#, e),
+                &serde_json::json!({"error": format!("serialization failed: {}", e)}).to_string(),
             ),
         },
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!(r#"{{"error":"{}"}}"#, e),
+            &serde_json::json!({"error": e.to_string()}).to_string(),
         ),
     }
 }

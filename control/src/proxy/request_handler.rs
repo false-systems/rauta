@@ -635,10 +635,16 @@ async fn execute_with_retry(
         // Build retry request preserving original headers (Auth, Content-Type, etc.)
         let mut retry_builder = Request::builder().method(retry_method).uri(&backend_uri);
 
-        // Copy all original headers except Host (we'll set backend Host) and hop-by-hop headers
+        // Copy all original headers except Host, hop-by-hop, and body-specific headers
+        // (retry body is always empty, so content-length/content-type would be misleading)
         for (name, value) in original_headers.iter() {
             let name_str = name.as_str();
-            if name_str != "host" && !crate::proxy::forwarder::is_hop_by_hop_header(name_str) {
+            if name_str != "host"
+                && name_str != "content-length"
+                && name_str != "content-type"
+                && name_str != "content-encoding"
+                && !crate::proxy::forwarder::is_hop_by_hop_header(name_str)
+            {
                 retry_builder = retry_builder.header(name, value);
             }
         }

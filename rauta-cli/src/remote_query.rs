@@ -19,7 +19,7 @@ impl RemoteGatewayQuery {
 
     pub async fn get_status(&self) -> anyhow::Result<GatewaySnapshot> {
         let url = format!("{}/api/v1/status", self.base_url);
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.client.get(&url).send().await?.error_for_status()?;
         let snapshot: GatewaySnapshot = resp.json().await?;
         Ok(snapshot)
     }
@@ -29,19 +29,24 @@ impl RemoteGatewayQuery {
         _method_filter: Option<&str>,
     ) -> anyhow::Result<Vec<RouteSnapshot>> {
         let url = format!("{}/api/v1/routes", self.base_url);
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.client.get(&url).send().await?.error_for_status()?;
         let routes: Vec<RouteSnapshot> = resp.json().await?;
         Ok(routes)
     }
 
     pub async fn get_route(&self, _pattern: &str) -> anyhow::Result<Option<RouteSnapshot>> {
-        // Placeholder — admin server doesn't have this endpoint yet
         Ok(None)
     }
 
     pub async fn diagnose(&self, symptom: &str) -> anyhow::Result<Vec<Diagnosis>> {
-        let url = format!("{}/api/v1/diagnose?symptom={}", self.base_url, symptom);
-        let resp = self.client.post(&url).send().await?;
+        let url = format!("{}/api/v1/diagnose", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .query(&[("symptom", symptom)])
+            .send()
+            .await?
+            .error_for_status()?;
         let diagnoses: Vec<Diagnosis> = resp.json().await?;
         Ok(diagnoses)
     }

@@ -11,7 +11,7 @@
 //! | `rauta_status` | Health overview: uptime, route count, open circuits |
 //! | `rauta_list_routes` | All routes with backends |
 //! | `rauta_get_route` | Single route detail |
-//! | `rauta_list_backends` | Backends with health |
+//! | `rauta_metrics_snapshot` | Prometheus metrics as JSON |
 //! | `rauta_list_circuit_breakers` | Circuit breaker states |
 //! | `rauta_list_rate_limiters` | Rate limiter state |
 //! | `rauta_diagnose` | Run diagnostics |

@@ -175,7 +175,9 @@ impl TokenBucket {
     /// * `rate` - Tokens per second (e.g., 100.0 = 100 requests/sec)
     /// * `burst` - Maximum burst capacity (tokens)
     pub fn new(rate: f64, burst: u64) -> Self {
-        let capacity = burst as f64;
+        // Clamp burst to 16.16 fixed-point range (max ~65535 tokens in upper 32 bits)
+        let clamped_burst = burst.min(65535);
+        let capacity = clamped_burst as f64;
         let capacity_fixed = float_to_fixed(capacity);
         // Convert tokens/sec to tokens/ms in fixed-point
         let refill_rate_per_ms_fixed = float_to_fixed(rate / 1000.0);
@@ -207,15 +209,16 @@ impl TokenBucket {
         }
 
         let n_fixed = float_to_fixed(n);
-        let now_ms = self.created_at.elapsed().as_millis() as u64;
+        // Mask to u32 range to handle wrapping after ~49.7 days uptime
+        let now_ms = (self.created_at.elapsed().as_millis() as u32) as u64;
 
         loop {
             let current = self.packed.load(Ordering::Acquire);
             let old_tokens = unpack_tokens(current);
             let old_refill_ms = unpack_refill_offset(current);
 
-            // Refill based on elapsed time since last refill
-            let elapsed_ms = now_ms.saturating_sub(old_refill_ms);
+            // Wrapping subtraction handles 32-bit timestamp overflow (~49.7 days)
+            let elapsed_ms = (now_ms as u32).wrapping_sub(old_refill_ms as u32) as u64;
             let tokens_to_add = elapsed_ms * self.refill_rate_per_ms_fixed;
             let new_tokens = (old_tokens + tokens_to_add).min(self.capacity_fixed);
 
@@ -247,12 +250,12 @@ impl TokenBucket {
 
     /// Get current token count (for testing/metrics)
     pub fn available_tokens(&self) -> f64 {
-        let now_ms = self.created_at.elapsed().as_millis() as u64;
+        let now_ms = (self.created_at.elapsed().as_millis() as u32) as u64;
         let current = self.packed.load(Ordering::Acquire);
         let old_tokens = unpack_tokens(current);
         let old_refill_ms = unpack_refill_offset(current);
 
-        let elapsed_ms = now_ms.saturating_sub(old_refill_ms);
+        let elapsed_ms = (now_ms as u32).wrapping_sub(old_refill_ms as u32) as u64;
         let tokens_to_add = elapsed_ms * self.refill_rate_per_ms_fixed;
         let tokens = (old_tokens + tokens_to_add).min(self.capacity_fixed);
 
