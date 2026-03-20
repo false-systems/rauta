@@ -234,13 +234,9 @@ impl Backend {
 
     /// Get IPv4 address as u32 (for logging and legacy code)
     ///
-    /// **Panics** if this is an IPv6 backend. Use only in contexts where IPv4 is guaranteed.
-    ///
-    /// **Note**: This helper reduces code duplication from the common pattern:
-    /// `u32::from(backend.as_ipv4().unwrap())`
-    #[allow(clippy::expect_used)]
-    pub fn ipv4_as_u32(&self) -> u32 {
-        u32::from(self.as_ipv4().expect("Backend must be IPv4"))
+    /// Returns `None` if this is an IPv6 backend.
+    pub fn ipv4_as_u32(&self) -> Option<u32> {
+        self.as_ipv4().map(u32::from)
     }
 
     /// Convert Backend to SocketAddr (for TCP connections)

@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod admin;
 mod apis;
 mod config;
 mod error;
@@ -60,6 +61,27 @@ async fn main() -> Result<()> {
         rate_limiter.clone(),
         circuit_breaker.clone(),
     ));
+
+    // Start admin server on separate port (management plane, never competes with data plane)
+    let admin_port: u16 = env::var("RAUTA_ADMIN_PORT")
+        .unwrap_or_else(|_| "9091".to_string())
+        .parse()
+        .unwrap_or(9091);
+
+    let admin_query = admin::local_query::LocalGatewayQuery::new(
+        router.clone(),
+        circuit_breaker.clone(),
+        rate_limiter.clone(),
+    );
+
+    let admin_addr = std::net::SocketAddr::from(([0, 0, 0, 0], admin_port));
+    let admin_server = admin::server::AdminServer::new(admin_query, admin_addr);
+    tokio::spawn(async move {
+        if let Err(e) = admin_server.serve().await {
+            error!("Admin server error: {}", e);
+        }
+    });
+    info!("📊 Admin server listening on port {}", admin_port);
 
     // Kubernetes Gateway API controllers (optional)
     let mut controller_handles = vec![];

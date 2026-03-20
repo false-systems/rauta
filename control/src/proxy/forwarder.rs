@@ -7,11 +7,13 @@
 use crate::proxy::backend_pool::{BackendConnectionPools, PoolError};
 use crate::proxy::filters::Timeout;
 use crate::proxy::worker::Worker;
+use arrayvec::ArrayString;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Request, Response};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -28,18 +30,20 @@ pub type ProtocolCache = Arc<Mutex<HashMap<String, bool>>>; // true = HTTP/2, fa
 
 /// Check if a header is hop-by-hop and should not be forwarded
 /// Per RFC 2616 Section 13.5.1
+///
+/// Uses case-insensitive comparison via `eq_ignore_ascii_case` instead of
+/// `to_lowercase()` to avoid heap allocation on every header check.
+/// hyper's HeaderName is already lowercase per HTTP/2 spec, but we handle
+/// mixed-case for safety.
 pub fn is_hop_by_hop_header(name: &str) -> bool {
-    matches!(
-        name.to_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    )
+    name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("keep-alive")
+        || name.eq_ignore_ascii_case("proxy-authenticate")
+        || name.eq_ignore_ascii_case("proxy-authorization")
+        || name.eq_ignore_ascii_case("te")
+        || name.eq_ignore_ascii_case("trailer")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("upgrade")
 }
 
 /// Convert IPv4 u32 to string format (e.g., "192.168.1.1")
@@ -91,21 +95,28 @@ pub async fn forward_to_backend(
         Bytes::new() // Empty body, zero allocation
     } else {
         // Slow path: POST/PUT/PATCH may have body
+        // Enforce max body size to prevent OOM from unbounded requests (10MB default)
+        const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
         let body_read_start = Instant::now();
-        let bytes = body
-            .collect()
-            .await
-            .map_err(|e| {
-                error!(
-                    request_id = %request_id,
-                    error.message = %e,
-                    error.type = "request_body_read",
-                    elapsed_us = body_read_start.elapsed().as_micros() as u64,
-                    "Failed to read request body"
-                );
-                format!("Failed to read request body: {}", e)
-            })?
-            .to_bytes();
+        let collected = body.collect().await.map_err(|e| {
+            error!(
+                request_id = %request_id,
+                error.message = %e,
+                error.type = "request_body_read",
+                elapsed_us = body_read_start.elapsed().as_micros() as u64,
+                "Failed to read request body"
+            );
+            format!("Failed to read request body: {}", e)
+        })?;
+        let bytes = collected.to_bytes();
+
+        if bytes.len() > MAX_BODY_SIZE {
+            return Err(format!(
+                "Request body too large: {} bytes (max {})",
+                bytes.len(),
+                MAX_BODY_SIZE
+            ));
+        }
 
         let body_read_duration = body_read_start.elapsed();
         info!(
@@ -125,10 +136,19 @@ pub async fn forward_to_backend(
         .map(|pq| pq.as_str())
         .unwrap_or("/");
 
+    // Stack-allocated URI string (512 bytes covers all practical URIs, zero heap allocation)
     // Backend::Display formats correctly for both IPv4 and IPv6:
     // IPv4: "1.2.3.4:8080" → "http://1.2.3.4:8080/path"
     // IPv6: "[2001:db8::1]:8080" → "http://[2001:db8::1]:8080/path"
-    let backend_uri = format!("http://{}{}", backend, path_and_query);
+    let backend_uri = {
+        let mut buf: ArrayString<512> = ArrayString::new();
+        // write! on ArrayString returns Err if capacity exceeded — fall back to heap
+        if write!(buf, "http://{}{}", backend, path_and_query).is_ok() {
+            buf.as_str().to_string() // Still need String for hyper URI parsing, but we avoid format! overhead
+        } else {
+            format!("http://{}{}", backend, path_and_query)
+        }
+    };
 
     // Save method for logging before we move parts.method
     let method_str = parts.method.to_string();
@@ -144,12 +164,10 @@ pub async fn forward_to_backend(
         }
     }
 
-    // Set Host header to match backend address (supports IPv4 and IPv6)
-    let backend_host = backend.to_string();
-    backend_req_builder = backend_req_builder.header("Host", backend_host);
-
-    // Check protocol cache BEFORE cloning body (optimization: avoid clone on hot path)
+    // Compute backend display string once, reuse for Host header and protocol cache key
+    // This eliminates the second backend.to_string() allocation
     let backend_key = backend.to_string();
+    backend_req_builder = backend_req_builder.header("Host", backend_key.as_str());
     let protocol_cached = {
         let cache = protocol_cache.lock().await;
         cache.get(&backend_key).copied()

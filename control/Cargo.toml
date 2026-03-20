@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 # Core
 common = { path = "../common", default-features = false, features = ["serde"] }
+agent-api = { path = "../agent-api" }
 tokio = { version = "1.41", features = ["full"] }
 tokio-util = "0.7"  # For CancellationToken
 anyhow = "1.0"
@@ -31,6 +32,7 @@ serde_yaml = "0.9"  # For Gateway YAML parsing in tests
 
 # Async utilities
 futures = "0.3"
+async-trait = "0.1"
 
 # Time handling (for Gateway API condition timestamps)
 chrono = "0.4"
@@ -57,6 +59,8 @@ libc = "0.2"
 
 # Performance: jemalloc allocator (better for async workloads)
 tikv-jemallocator = "0.6"
+arrayvec = "0.7"  # Stack-allocated strings for hot path (zero heap allocation)
+arc-swap = "1"    # Lock-free atomic pointer swaps for RCU pattern
 
 # TLS termination
 rustls = { version = "0.23", features = ["ring"] }  # Use ring crypto provider

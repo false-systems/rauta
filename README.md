@@ -1,219 +1,126 @@
-# RAUTA
-
-**Kubernetes Gateway API Controller - Learning Project**
-
-[![CI](https://github.com/yairfalse/rauta/actions/workflows/ci.yml/badge.svg)](https://github.com/yairfalse/rauta/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.83%2B-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-201%2B-green.svg)]()
-
-A Kubernetes Gateway API controller written in Rust. Built to learn Kubernetes networking, Rust async, and L7 proxy patterns.
-
-**This is a learning project** - I'm building it to understand:
-- How Kubernetes Gateway API works (kube-rs)
-- L7 HTTP proxy patterns (hyper, tokio)
-- Load balancing algorithms (Maglev consistent hashing)
-- TLS termination and HTTP/2
-- Connection pooling and health checking
-
-**Current Status**: Stage 1 complete - full Gateway API controller with HTTP proxy.
+<p align="center">
+  <br>
+  <strong>R A U T A</strong>
+  <br>
+  <em>iron</em> — AI-native Kubernetes API gateway
+  <br>
+  <br>
+  <a href="https://github.com/false-systems/rauta/actions/workflows/ci.yml"><img src="https://github.com/false-systems/rauta/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/tests-220%2B-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/rust-1.83%2B-f74c00" alt="Rust">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License">
+</p>
 
 ---
 
-## Features
+Rust Kubernetes Gateway API controller + L7 HTTP proxy. Lock-free hot path. AI agents are first-class operators.
 
-| Feature | Description |
-|---------|-------------|
-| **Gateway API v1** | Full support for GatewayClass, Gateway, HTTPRoute |
-| **HTTP/1.1 & HTTP/2** | Both cleartext (h2c) and over TLS |
-| **TLS Termination** | SNI support, ALPN negotiation |
-| **Maglev Load Balancing** | Google's consistent hashing algorithm |
-| **Path Matching** | Prefix matching with radix tree (matchit) |
-| **Header/Query Matching** | Exact and regex matching |
-| **Request Filters** | Header modification, redirects |
-| **Response Filters** | Header modification |
-| **Rate Limiting** | Token bucket algorithm per route |
-| **Circuit Breaker** | Passive health checking (error rate threshold) |
-| **Connection Pooling** | Per-backend, per-protocol pools |
-| **Retries** | Exponential backoff |
-| **Prometheus Metrics** | Request counts, latencies per route |
-| **Leader Election** | HA-ready (Kubernetes Lease) |
+```
+cargo build --release -p control     # gateway
+cargo build --release -p rauta-cli   # CLI
+cargo test --workspace               # 220+ tests
+```
 
----
+## What it does
 
-## Quick Start
+RAUTA sits between your clients and backends. It routes HTTP traffic using Kubernetes Gateway API resources, load-balances with Maglev consistent hashing, and lets AI agents query and operate it via MCP.
 
+```
+                  Client
+                    │
+          ┌─────── ▼ ───────┐
+          │     RAUTA        │
+          │                  │
+          │  Route → Maglev  │──── :9091 Admin API ◄── AI Agent / CLI
+          │  Filter → Forward│         │
+          │  TLS ─ HTTP/2    │    MCP Tools (11)
+          │                  │    Diagnostics Engine
+          └──┬────┬────┬─────┘    Prometheus Metrics
+             │    │    │
+             ▼    ▼    ▼
+          Backend Backend Backend
+```
+
+## Performance
+
+The hot path (every request) uses **zero locks** for health checks and **zero heap allocations** for routing:
+
+| Component | Before | After |
+|-----------|--------|-------|
+| Circuit breaker | 5 RwLocks | 1 AtomicU64 (CAS) |
+| Rate limiter | 3 RwLocks | 1 AtomicU64 (CAS) |
+| Health checks | 2 RwLocks | 1 ArcSwap load (~1ns) |
+| Backend index tracking | HashSet (heap) | u32 bitmask (stack) |
+| Hop-by-hop header check | to_lowercase() (heap) | eq_ignore_ascii_case (stack) |
+| Route filter cloning | Deep clone | Arc::clone (~1ns) |
+
+```
+select_backend()            →  1 RwLock read (route table) + 1 atomic load (health)
+circuit_breaker.allow()     →  1 atomic load
+rate_limiter.try_acquire()  →  1 CAS loop
+```
+
+## Agent API
+
+RAUTA is queryable and operable by AI agents. Three interfaces, same data:
+
+**MCP Server** — 11 tools for Claude Code, Cursor, or any MCP client:
+```
+rauta_status              rauta_list_routes         rauta_get_route
+rauta_list_circuit_breakers   rauta_list_rate_limiters   rauta_diagnose
+rauta_drain_backend       rauta_undrain_backend     rauta_cache_stats
+rauta_list_listeners      rauta_metrics_snapshot
+```
+
+**CLI** — human and machine output:
 ```bash
-# Clone and build
-git clone https://github.com/yairfalse/rauta
-cd rauta
-cargo build --release
-
-# Run tests (201+ test cases)
-cargo test
-
-# Run in standalone mode (no Kubernetes)
-RAUTA_BACKEND_ADDR=127.0.0.1:9090 \
-RAUTA_BIND_ADDR=127.0.0.1:8080 \
-./target/release/control
-
-# Run in Kubernetes mode
-RAUTA_K8S_MODE=true ./target/release/control
+rauta status                          # table output (default)
+rauta routes list --format=json       # machine-readable
+rauta diagnose circuit-breaker-cascade --format=agent  # LLM-optimized
+rauta backends drain 10.0.1.5:8080
 ```
 
-**Requirements:**
-- Rust 1.83+
-- Kubernetes 1.28+ (for K8s mode)
-- Gateway API CRDs installed
-
----
-
-## Architecture
-
+**Admin REST API** — port 9091, separate from data plane:
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         RAUTA Controller                                 │
-│                                                                          │
-│  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │  Kubernetes Controllers (kube-rs)                                  │ │
-│  │  ├── GatewayClass reconciler                                       │ │
-│  │  ├── Gateway reconciler → ListenerManager                          │ │
-│  │  ├── HTTPRoute reconciler → Router                                 │ │
-│  │  ├── EndpointSlice watcher → Dynamic backend discovery             │ │
-│  │  └── Secret watcher → TLS certificates                             │ │
-│  └────────────────────────────────────────────────────────────────────┘ │
-│                                    │                                     │
-│                                    ▼                                     │
-│  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │  HTTP Proxy (hyper + tokio)                                        │ │
-│  │  ├── Router: matchit radix tree + Maglev hash tables               │ │
-│  │  ├── Connection pools: HTTP/1.1 and HTTP/2 per backend             │ │
-│  │  ├── TLS: rustls with SNI + ALPN                                   │ │
-│  │  ├── Filters: headers, redirects, timeouts                         │ │
-│  │  └── Health: circuit breaker, rate limiter                         │ │
-│  └────────────────────────────────────────────────────────────────────┘ │
-│                                    │                                     │
-│                                    ▼                                     │
-│  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │  Observability                                                     │ │
-│  │  └── Prometheus /metrics endpoint                                  │ │
-│  └────────────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────┘
+GET  /api/v1/status
+GET  /api/v1/routes
+GET  /api/v1/cache
+POST /api/v1/diagnose?symptom=circuit-breaker-cascade
 ```
 
-### Request Flow
+## Diagnostics Engine
 
-```
-Client Request
-      │
-      ▼
-┌─────────────┐
-│  Listener   │ (TCP accept, TLS handshake if HTTPS)
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│   Router    │ (path match → Maglev → backend selection)
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  Filters    │ (request headers, auth checks)
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  Forwarder  │ (connection pool → backend request)
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  Filters    │ (response headers)
-└──────┬──────┘
-       │
-       ▼
-Client Response
-```
+Deterministic Rust rules that explain gateway state. No LLM — pure structured reasoning.
 
-### Maglev Load Balancing
+| Rule | Detects | Severity |
+|------|---------|----------|
+| RAUTA-CB-001 | Circuit breaker cascade (2+ Open) | Critical |
+| RAUTA-CB-002 | Single circuit breaker open | Warning |
+| RAUTA-RL-001 | Rate limit exhausted | Warning |
+| RAUTA-BE-001 | No healthy backends | Critical |
+| RAUTA-BE-002 | All backends draining | Warning |
+| RAUTA-CACHE-001 | Low cache hit rate (<50%) | Info |
+| RAUTA-LISTEN-001 | Listener port conflict | Info |
 
-RAUTA uses Google's Maglev algorithm for consistent hashing:
+Each diagnosis includes a causal chain, evidence, and actionable CLI commands.
 
-- **O(1) lookup** - Hash to backend in constant time
-- **Minimal disruption** - ~1/N connections move when backends change
-- **Weighted** - Supports weighted backend distribution
-- **Sticky** - Same (client_ip, port) → same backend
+## Gateway API
 
-```
-Hash(path, client_ip, client_port)
-           │
-           ▼
-   ┌───────────────┐
-   │ Maglev Table  │  (65,537 entries)
-   │ [0] → B1      │
-   │ [1] → B2      │
-   │ [2] → B1      │
-   │ ...           │
-   │ [N] → B3      │
-   └───────────────┘
-           │
-           ▼
-     Selected Backend
-```
-
----
-
-## Gateway API Example
+Full Kubernetes Gateway API v1 support:
 
 ```yaml
-# GatewayClass
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: rauta
-spec:
-  controllerName: rauta.io/gateway-controller
-
----
-# Gateway
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: my-gateway
-spec:
-  gatewayClassName: rauta
-  listeners:
-  - name: http
-    port: 80
-    protocol: HTTP
-  - name: https
-    port: 443
-    protocol: HTTPS
-    tls:
-      mode: Terminate
-      certificateRefs:
-      - name: my-cert
-
----
-# HTTPRoute
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: api-route
+  name: api
 spec:
   parentRefs:
   - name: my-gateway
-  hostnames:
-  - "api.example.com"
   rules:
   - matches:
     - path:
         type: PathPrefix
         value: /api/v1
-      method: GET
-    - headers:
-      - name: X-API-Version
-        value: "2"
     backendRefs:
     - name: api-service
       port: 8080
@@ -221,184 +128,88 @@ spec:
     - name: api-canary
       port: 8080
       weight: 10
-    filters:
-    - type: RequestHeaderModifier
-      requestHeaderModifier:
-        add:
-        - name: X-Request-ID
-          value: "{{uuid}}"
-    - type: ResponseHeaderModifier
-      responseHeaderModifier:
-        add:
-        - name: X-Served-By
-          value: "rauta"
 ```
 
----
+**Supported resources:** GatewayClass, Gateway, HTTPRoute, EndpointSlice, Secret (TLS)
 
-## Configuration
+**Routing features:** path prefix matching (radix tree), header matching (exact + regex), query parameter matching, method matching, weighted backends
 
-### Environment Variables
+**Filters:** request/response header modification, HTTP redirects (301/302), timeouts, retries with exponential backoff
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RAUTA_K8S_MODE` | `false` | Enable Kubernetes mode |
-| `RAUTA_BIND_ADDR` | `0.0.0.0:8080` | Listen address (standalone) |
-| `RAUTA_BACKEND_ADDR` | - | Backend address (standalone) |
-| `RAUTA_TLS_CERT` | - | TLS certificate path |
-| `RAUTA_TLS_KEY` | - | TLS key path |
-| `RAUTA_GATEWAY_CLASS` | `rauta` | GatewayClass name to watch |
-| `RAUTA_LOG_LEVEL` | `info` | Log level |
-| `RUST_LOG` | `info` | Tracing log level |
+**Load balancing:** Maglev consistent hashing — O(1) lookup, ~1/N disruption on backend changes, weighted distribution, sticky sessions via (client_ip, port) hash
 
-### Endpoints
-
-| Port | Endpoint | Purpose |
-|------|----------|---------|
-| 8080 | `/` | HTTP proxy (configurable) |
-| 9090 | `/metrics` | Prometheus metrics |
-| 9090 | `/healthz` | Liveness probe |
-| 9090 | `/readyz` | Readiness probe |
-
----
-
-## Project Structure
+## Workspace
 
 ```
 rauta/
-├── common/                          # Shared types (no_std compatible)
-│   └── src/lib.rs                   # HttpMethod, Backend, Maglev, RouteKey
-├── control/                         # Main controller
-│   └── src/
-│       ├── main.rs                  # Entry point
-│       ├── apis/gateway/            # Kubernetes controllers
-│       │   ├── gateway_class.rs     # GatewayClass reconciler
-│       │   ├── gateway.rs           # Gateway reconciler
-│       │   ├── http_route.rs        # HTTPRoute reconciler
-│       │   ├── endpointslice_watcher.rs  # Pod discovery
-│       │   └── secret_watcher.rs    # TLS secrets
-│       └── proxy/                   # HTTP proxy
-│           ├── router.rs            # Route matching + Maglev
-│           ├── server.rs            # HTTP server
-│           ├── listener_manager.rs  # Dynamic listeners
-│           ├── request_handler.rs   # Request routing
-│           ├── forwarder.rs         # Backend forwarding
-│           ├── filters.rs           # Request/response filters
-│           ├── tls.rs               # TLS termination
-│           ├── backend_pool.rs      # Connection pooling
-│           ├── http1_pool.rs        # HTTP/1.1 pool
-│           ├── circuit_breaker.rs   # Passive health
-│           ├── rate_limiter.rs      # Token bucket
-│           ├── health_checker.rs    # Active health (TCP probes)
-│           └── metrics.rs           # Prometheus
-└── deploy/                          # Kubernetes manifests
-    ├── rauta-daemonset.yaml
-    └── gateway-api.yaml
+├── common/       no_std types — HttpMethod, Backend, Maglev, RouteKey
+├── control/      gateway controller + HTTP proxy + admin server
+├── agent-api/    GatewayQuery trait, typed snapshots, diagnostics engine
+├── mcp-server/   MCP tool definitions for AI agents
+└── rauta-cli/    CLI binary + kubectl-rauta plugin
 ```
 
----
+## Quick start
+
+```bash
+# Standalone mode (no Kubernetes)
+RAUTA_BACKEND_ADDR=127.0.0.1:9090 ./target/release/control
+
+# Kubernetes mode
+RAUTA_K8S_MODE=true ./target/release/control
+
+# Admin API is always on :9091
+curl localhost:9091/api/v1/status
+```
+
+## Configuration
+
+| Variable | Default | What |
+|----------|---------|------|
+| `RAUTA_K8S_MODE` | `false` | Enable Kubernetes controllers |
+| `RAUTA_BIND_ADDR` | `0.0.0.0:8080` | Proxy listen address |
+| `RAUTA_BACKEND_ADDR` | — | Backend (standalone mode) |
+| `RAUTA_ADMIN_PORT` | `9091` | Admin server port |
+| `RAUTA_ADMIN_ENDPOINT` | `http://localhost:9091` | CLI target |
+| `RAUTA_TLS_CERT` | — | TLS certificate path |
+| `RAUTA_TLS_KEY` | — | TLS private key path |
+| `RAUTA_GATEWAY_CLASS` | `rauta` | GatewayClass to watch |
+| `RUST_LOG` | `info` | Log level |
 
 ## Development
 
-### Build & Test
-
 ```bash
-# Build
-cargo build --release
-
-# Run tests (201+ test cases)
-cargo test
-
-# Lint
-cargo clippy -- -D warnings
-
-# Format
-cargo fmt
-
-# Run all CI checks locally
-make ci-local
+cargo test --workspace               # all 220+ tests
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+make ci-local                         # full CI
 ```
 
-### Local Development
+Pre-commit and pre-push hooks run fmt, clippy, and tests automatically.
 
-```bash
-# Create kind cluster
-kind create cluster --name rauta-dev
+## Tech
 
-# Install Gateway API CRDs
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
+[kube](https://kube.rs) ·
+[hyper](https://hyper.rs) ·
+[tokio](https://tokio.rs) ·
+[rustls](https://github.com/rustls/rustls) ·
+[matchit](https://github.com/ibraheemdev/matchit) ·
+[arc-swap](https://github.com/vorner/arc-swap) ·
+[jemalloc](https://jemalloc.net) ·
+[prometheus](https://github.com/tikv/rust-prometheus)
 
-# Run controller
-RAUTA_K8S_MODE=true cargo run
-```
+## FALSE Systems
 
----
+RAUTA is part of the [FALSE Systems](https://github.com/false-systems) tool family:
 
-## Tech Stack
-
-| Component | Purpose |
-|-----------|---------|
-| [kube](https://kube.rs) | Kubernetes API client + controller runtime |
-| [hyper](https://hyper.rs) | HTTP/1.1 and HTTP/2 server/client |
-| [tokio](https://tokio.rs) | Async runtime |
-| [tokio-rustls](https://github.com/rustls/tokio-rustls) | TLS termination |
-| [gateway-api](https://gateway-api.sigs.k8s.io) | Gateway API CRD types |
-| [matchit](https://github.com/ibraheemdev/matchit) | Radix tree for path matching |
-| [prometheus](https://github.com/tikv/rust-prometheus) | Metrics |
-| [tracing](https://tracing.rs) | Structured logging |
-| [jemalloc](https://jemalloc.net/) | Memory allocator (better for async) |
+| Tool | Finnish | What |
+|------|---------|------|
+| **RAUTA** | iron | API gateway |
+| **AHTI** | god of the sea | Causality engine |
+| **POLKU** | path | Event transport |
+| **KULTA** | gold | Progressive delivery |
+| **TAPIO** | forest god | Infrastructure management |
 
 ---
-
-## Design Decisions
-
-**Why Gateway API instead of Ingress?**
-
-Gateway API is the modern Kubernetes standard (v1 as of Oct 2023). It's more expressive and role-oriented than Ingress.
-
-**Why Maglev for load balancing?**
-
-Consistent hashing keeps connections sticky to the same backend. When backends change, only ~1/N connections get redistributed. Maglev is Google's algorithm - O(1) lookup and proven at scale.
-
-**Why userspace L7?**
-
-HTTP/2 and TLS require TCP reassembly which can only be done in userspace. L7 proxying needs full protocol understanding.
-
-**Why Rust?**
-
-Memory safety without garbage collection. Good ecosystem (tokio, kube-rs, hyper). Learning opportunity.
-
----
-
-## Roadmap
-
-**Stage 1 (Complete):**
-- Gateway API controller
-- HTTP proxy with routing
-- TLS termination
-- Load balancing
-- Health checking
-- Metrics
-
-**Stage 2 (Planned):**
-- WASM plugin system (wasmtime)
-- Plugin SDK (Rust, Go, TypeScript)
-- Built-in plugins (JWT, CORS, rate-limit)
-
----
-
-## Naming
-
-**Rauta** (Finnish: "iron") - Part of a Finnish tool naming theme:
-- **RAUTA** (iron) - Gateway API controller
-- **KULTA** (gold) - Progressive delivery controller
-
----
-
-## License
 
 Apache 2.0
-
----
-
-**Learning Rust. Learning K8s. Building tools.**

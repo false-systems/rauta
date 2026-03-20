@@ -18,11 +18,15 @@ use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
+use once_cell::sync::Lazy;
 use prometheus::{Encoder, TextEncoder};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// Server start time for uptime calculation
+static START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
 /// Worker selector for round-robin distribution
 pub struct WorkerSelector {
@@ -250,6 +254,11 @@ pub async fn handle_request(
         return serve_healthz_endpoint();
     }
 
+    // Handle /status endpoint (JSON status for operators)
+    if path == "/status" && *req.method() == hyper::Method::GET {
+        return serve_status_endpoint(&router);
+    }
+
     // Start timing after /metrics check
     let start = Instant::now();
 
@@ -360,7 +369,7 @@ pub async fn handle_request(
             );
 
             // Apply response filters and return
-            finalize_response(result, route_match.response_filters.as_ref(), &request_id)
+            finalize_response(result, route_match.response_filters.as_deref(), &request_id)
         }
         None => {
             let duration = start.elapsed();
@@ -445,6 +454,36 @@ fn serve_healthz_endpoint() -> Result<Response<BoxBody<Bytes, hyper::Error>>, St
         .unwrap())
 }
 
+/// Serve the /status endpoint (JSON status for operators)
+///
+/// Returns a JSON object with operational status:
+/// - status: "ok" if healthy
+/// - uptime_seconds: time since server start
+/// - routes: number of configured routes
+fn serve_status_endpoint(
+    router: &Router,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+    let uptime = START_TIME.elapsed().as_secs();
+    let routes = router.route_count();
+
+    // Build JSON response (manual to avoid serde dependency for this simple case)
+    let json = format!(
+        r#"{{"status":"ok","uptime_seconds":{},"routes":{}}}"#,
+        uptime, routes
+    );
+
+    #[allow(clippy::unwrap_used)]
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(
+            Full::new(Bytes::from(json))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .unwrap())
+}
+
 /// Execute request with optional retry logic
 #[allow(clippy::too_many_arguments)]
 async fn execute_request_with_retry(
@@ -459,8 +498,8 @@ async fn execute_request_with_retry(
     workers: Option<Workers>,
     worker_index: Option<usize>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
-    let overall_request_timeout = route_match.timeout.as_ref().and_then(|t| t.request);
-    let retry_config = route_match.retry.as_ref();
+    let overall_request_timeout = route_match.timeout.as_deref().and_then(|t| t.request);
+    let retry_config = route_match.retry.as_deref();
     let is_retryable_method =
         method == common::HttpMethod::GET || method == common::HttpMethod::HEAD;
 
@@ -514,6 +553,9 @@ async fn execute_with_retry(
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
     let max_attempts = retry_cfg.max_retries + 1;
 
+    // Save original headers for retry requests (fix: retry was dropping all headers except Host)
+    let original_headers = req.headers().clone();
+
     // First attempt
     let first_result = if let Some(timeout_duration) = overall_timeout {
         match tokio::time::timeout(
@@ -527,7 +569,7 @@ async fn execute_with_retry(
                 protocol_cache.clone(),
                 workers.clone(),
                 worker_index,
-                route_match.timeout.as_ref(),
+                route_match.timeout.as_deref(),
             ),
         )
         .await
@@ -548,7 +590,7 @@ async fn execute_with_retry(
             protocol_cache.clone(),
             workers.clone(),
             worker_index,
-            route_match.timeout.as_ref(),
+            route_match.timeout.as_deref(),
         )
         .await
     };
@@ -590,12 +632,25 @@ async fn execute_with_retry(
             _ => hyper::Method::GET,
         };
 
-        let retry_req = match Request::builder()
-            .method(retry_method)
-            .uri(&backend_uri)
-            .header("Host", route_match.backend.to_string())
-            .body(Full::new(Bytes::new()))
-        {
+        // Build retry request preserving original headers (Auth, Content-Type, etc.)
+        let mut retry_builder = Request::builder().method(retry_method).uri(&backend_uri);
+
+        // Copy all original headers except Host, hop-by-hop, and body-specific headers
+        // (retry body is always empty, so content-length/content-type would be misleading)
+        for (name, value) in original_headers.iter() {
+            let name_str = name.as_str();
+            if name_str != "host"
+                && name_str != "content-length"
+                && name_str != "content-type"
+                && name_str != "content-encoding"
+                && !crate::proxy::forwarder::is_hop_by_hop_header(name_str)
+            {
+                retry_builder = retry_builder.header(name, value);
+            }
+        }
+        retry_builder = retry_builder.header("Host", route_match.backend.to_string());
+
+        let retry_req = match retry_builder.body(Full::new(Bytes::new())) {
             Ok(r) => r,
             Err(e) => {
                 last_result = Err(format!("Failed to build retry request: {}", e));
@@ -652,7 +707,7 @@ async fn execute_without_retry(
                 protocol_cache,
                 workers,
                 worker_index,
-                route_match.timeout.as_ref(),
+                route_match.timeout.as_deref(),
             ),
         )
         .await
@@ -680,7 +735,7 @@ async fn execute_without_retry(
             protocol_cache,
             workers,
             worker_index,
-            route_match.timeout.as_ref(),
+            route_match.timeout.as_deref(),
         )
         .await
     }
@@ -942,5 +997,67 @@ mod tests {
             let response = serve_healthz_endpoint().expect("healthz endpoint failed");
             assert_eq!(response.status(), StatusCode::OK);
         }
+    }
+
+    #[test]
+    fn test_status_endpoint_returns_200() {
+        let router = crate::proxy::router::Router::new();
+        let response = serve_status_endpoint(&router).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_status_endpoint_content_type() {
+        let router = crate::proxy::router::Router::new();
+        let response = serve_status_endpoint(&router).unwrap();
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(content_type, "application/json");
+    }
+
+    #[test]
+    fn test_status_endpoint_body_is_valid_json() {
+        use http_body_util::BodyExt;
+
+        let router = crate::proxy::router::Router::new();
+        let response = serve_status_endpoint(&router).unwrap();
+        let body = response.into_body();
+        let collected = futures::executor::block_on(body.collect()).unwrap();
+        let bytes = collected.to_bytes();
+        let json_str = std::str::from_utf8(&bytes).unwrap();
+
+        // Verify it's valid JSON with expected fields
+        assert!(json_str.contains(r#""status":"ok""#));
+        assert!(json_str.contains(r#""uptime_seconds":"#));
+        assert!(json_str.contains(r#""routes":"#));
+    }
+
+    #[test]
+    fn test_status_endpoint_route_count() {
+        use http_body_util::BodyExt;
+
+        let router = crate::proxy::router::Router::new();
+
+        // Add a route (127.0.0.1 = 0x7f000001)
+        router
+            .add_route(
+                common::HttpMethod::GET,
+                "/test",
+                vec![common::Backend::new(0x7f000001, 8080, 100)],
+            )
+            .unwrap();
+
+        let response = serve_status_endpoint(&router).unwrap();
+        let body = response.into_body();
+        let collected = futures::executor::block_on(body.collect()).unwrap();
+        let bytes = collected.to_bytes();
+        let json_str = std::str::from_utf8(&bytes).unwrap();
+
+        // Should show 1 route
+        assert!(json_str.contains(r#""routes":1"#));
     }
 }

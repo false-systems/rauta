@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "common",
     "control",
+    "agent-api",
+    "mcp-server",
+    "rauta-cli",
     # Stage 2+: Add back when needed
     # "bpf",
     # "cli",
@@ -10,6 +13,9 @@ members = [
 default-members = [
     "common",
     "control",
+    "agent-api",
+    "mcp-server",
+    "rauta-cli",
 ]
 
 [workspace.package]
