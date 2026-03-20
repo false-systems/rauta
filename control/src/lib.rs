@@ -2,6 +2,7 @@
 //!
 //! Exposes proxy, router, and backend pool modules for examples and tests
 
+pub mod admin;
 pub mod proxy;
 
 // Re-export commonly used modules

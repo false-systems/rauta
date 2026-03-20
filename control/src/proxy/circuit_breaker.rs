@@ -1,11 +1,20 @@
-//! Circuit Breaker Pattern Implementation
+//! Lock-Free Circuit Breaker Pattern Implementation
 //!
 //! Production-grade circuit breaker for backend health management:
 //! - Three states: Closed, Open, Half-Open
 //! - Configurable failure threshold and timeout
 //! - Automatic recovery testing
 //! - Per-backend isolation
-//! - Thread-safe atomic operations
+//! - **Lock-free**: All state packed into a single AtomicU64 (CAS-based)
+//!
+//! Bit layout of packed state (AtomicU64):
+//! ```text
+//! [63:62] state          (2 bits)  — 0=Closed, 1=Open, 2=HalfOpen
+//! [61:48] reserved       (14 bits) — future use
+//! [47:32] failure_count  (16 bits) — consecutive failures (max 65535)
+//! [31:16] success_count  (16 bits) — successes in Half-Open (max 65535)
+//! [15:0]  half_open_reqs (16 bits) — requests allowed in Half-Open (max 65535)
+//! ```
 //!
 //! Algorithm: https://martinfowler.com/bliki/CircuitBreaker.html
 //!
@@ -25,10 +34,12 @@
 //! }
 //! ```
 
+use arc_swap::ArcSwap;
 use lazy_static::lazy_static;
 use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
 
@@ -178,24 +189,6 @@ pub fn circuit_breaker_registry() -> &'static Registry {
     &CIRCUIT_BREAKER_REGISTRY
 }
 
-/// Safe RwLock read helper that recovers from poisoning
-#[inline]
-fn safe_read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|poisoned| {
-        warn!("RwLock poisoned during read, recovering (data is still valid)");
-        poisoned.into_inner()
-    })
-}
-
-/// Safe RwLock write helper that recovers from poisoning
-#[inline]
-fn safe_write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    lock.write().unwrap_or_else(|poisoned| {
-        warn!("RwLock poisoned during write, recovering (data is still valid)");
-        poisoned.into_inner()
-    })
-}
-
 /// Convert CircuitState to string for metrics labels
 #[inline]
 fn state_to_str(state: CircuitState) -> &'static str {
@@ -217,26 +210,84 @@ pub enum CircuitState {
     HalfOpen,
 }
 
-/// Circuit breaker for backend health management
+// ============================================================================
+// Packed state bit layout for AtomicU64
+// ============================================================================
+const STATE_SHIFT: u32 = 62;
+const STATE_MASK: u64 = 0x3 << STATE_SHIFT; // bits [63:62]
+const FAILURE_SHIFT: u32 = 32;
+const FAILURE_MASK: u64 = 0xFFFF << FAILURE_SHIFT; // bits [47:32]
+const SUCCESS_SHIFT: u32 = 16;
+const SUCCESS_MASK: u64 = 0xFFFF << SUCCESS_SHIFT; // bits [31:16]
+const HALFOPEN_MASK: u64 = 0xFFFF; // bits [15:0]
+
+const STATE_CLOSED: u64 = 0;
+const STATE_OPEN: u64 = 1;
+const STATE_HALFOPEN: u64 = 2;
+
+#[inline]
+fn pack_state(state: u64, failures: u64, successes: u64, half_open_reqs: u64) -> u64 {
+    (state << STATE_SHIFT)
+        | ((failures & 0xFFFF) << FAILURE_SHIFT)
+        | ((successes & 0xFFFF) << SUCCESS_SHIFT)
+        | (half_open_reqs & 0xFFFF)
+}
+
+#[inline]
+fn unpack_state_field(packed: u64) -> u64 {
+    (packed & STATE_MASK) >> STATE_SHIFT
+}
+
+#[inline]
+fn unpack_failures(packed: u64) -> u64 {
+    (packed & FAILURE_MASK) >> FAILURE_SHIFT
+}
+
+#[inline]
+fn unpack_successes(packed: u64) -> u64 {
+    (packed & SUCCESS_MASK) >> SUCCESS_SHIFT
+}
+
+#[inline]
+fn unpack_half_open_reqs(packed: u64) -> u64 {
+    packed & HALFOPEN_MASK
+}
+
+#[inline]
+fn state_from_u64(val: u64) -> CircuitState {
+    match val {
+        STATE_OPEN => CircuitState::Open,
+        STATE_HALFOPEN => CircuitState::HalfOpen,
+        _ => CircuitState::Closed,
+    }
+}
+
+#[inline]
+fn state_to_u64(state: CircuitState) -> u64 {
+    match state {
+        CircuitState::Closed => STATE_CLOSED,
+        CircuitState::Open => STATE_OPEN,
+        CircuitState::HalfOpen => STATE_HALFOPEN,
+    }
+}
+
+/// Lock-free circuit breaker for backend health management
 ///
-/// Implements the circuit breaker pattern with configurable thresholds.
-/// Thread-safe via interior mutability.
+/// All mutable state is packed into a single `AtomicU64`. State transitions use
+/// CAS (compare-and-swap) loops to ensure correctness without locks.
+/// A separate `AtomicU64` stores the last failure timestamp as epoch milliseconds.
 #[derive(Debug)]
 pub struct CircuitBreaker {
-    /// Current state
-    state: RwLock<CircuitState>,
+    /// Packed state: [63:62] state, [47:32] failures, [31:16] successes, [15:0] half_open_reqs
+    packed: AtomicU64,
+    /// Last failure time as milliseconds since breaker creation (separate atomic for timestamp)
+    last_failure_ms: AtomicU64,
+    /// When this breaker was created (reference point for last_failure_ms)
+    created_at: Instant,
     /// Failure threshold (consecutive failures to trip)
     failure_threshold: u32,
-    /// Success count (in Half-Open state)
-    success_count: RwLock<u32>,
-    /// Failure count (consecutive)
-    failure_count: RwLock<u32>,
     /// Timeout before attempting Half-Open (Open → Half-Open)
     timeout: Duration,
-    /// Last failure timestamp
-    last_failure_time: RwLock<Option<Instant>>,
-    /// Half-open test request count
-    half_open_requests: RwLock<u32>,
     /// Max requests in Half-Open state
     half_open_max_requests: u32,
 }
@@ -247,137 +298,234 @@ impl CircuitBreaker {
     /// # Arguments
     /// * `failure_threshold` - Consecutive failures before opening circuit
     /// * `timeout` - Duration to wait before attempting Half-Open
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let breaker = CircuitBreaker::new(5, Duration::from_secs(30));
-    /// ```
     pub fn new(failure_threshold: u32, timeout: Duration) -> Self {
         Self {
-            state: RwLock::new(CircuitState::Closed),
+            packed: AtomicU64::new(pack_state(STATE_CLOSED, 0, 0, 0)),
+            last_failure_ms: AtomicU64::new(0),
+            created_at: Instant::now(),
             failure_threshold,
-            success_count: RwLock::new(0),
-            failure_count: RwLock::new(0),
             timeout,
-            last_failure_time: RwLock::new(None),
-            half_open_requests: RwLock::new(0),
-            half_open_max_requests: 3, // Allow 3 test requests in Half-Open
+            half_open_max_requests: 3,
         }
     }
 
     /// Check if request should be allowed
     ///
-    /// Returns true if request allowed, false if circuit is Open
+    /// Returns true if request allowed, false if circuit is Open.
+    /// Uses CAS loop for lock-free state transitions.
     pub fn allow_request(&self) -> bool {
-        // Check if Open state should transition to Half-Open
-        {
-            let state = *safe_read(&self.state);
-            if state == CircuitState::Open && self.should_attempt_reset() {
-                // Transition to Half-Open
-                *safe_write(&self.state) = CircuitState::HalfOpen;
-                *safe_write(&self.half_open_requests) = 0;
-            }
-        }
+        loop {
+            let current = self.packed.load(Ordering::Acquire);
+            let state = unpack_state_field(current);
 
-        // Now check current state and allow/deny request
-        let state = *safe_read(&self.state);
-        match state {
-            CircuitState::Closed => true,
-            CircuitState::Open => false,
-            CircuitState::HalfOpen => {
-                // Allow limited requests for testing
-                let mut requests = safe_write(&self.half_open_requests);
-                if *requests < self.half_open_max_requests {
-                    *requests += 1;
-                    true
-                } else {
-                    false
+            match state {
+                STATE_CLOSED => return true,
+                STATE_OPEN => {
+                    // Check if timeout has elapsed for Open → HalfOpen transition
+                    if self.should_attempt_reset() {
+                        // CAS: transition Open → HalfOpen, immediately count this as first request
+                        let new = pack_state(STATE_HALFOPEN, 0, 0, 1);
+                        if self
+                            .packed
+                            .compare_exchange_weak(
+                                current,
+                                new,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            return true;
+                        }
+                        // CAS failed — another thread transitioned first, retry
+                        continue;
+                    }
+                    return false;
                 }
+                STATE_HALFOPEN => {
+                    // Allow limited requests for testing
+                    let half_open_reqs = unpack_half_open_reqs(current);
+                    if half_open_reqs < self.half_open_max_requests as u64 {
+                        let failures = unpack_failures(current);
+                        let successes = unpack_successes(current);
+                        let new =
+                            pack_state(STATE_HALFOPEN, failures, successes, half_open_reqs + 1);
+                        if self
+                            .packed
+                            .compare_exchange_weak(
+                                current,
+                                new,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            return true;
+                        }
+                        // CAS failed, retry
+                        continue;
+                    }
+                    return false;
+                }
+                _ => return false,
             }
         }
     }
 
     /// Record successful request
     pub fn record_success(&self) {
-        let state = *safe_read(&self.state);
+        loop {
+            let current = self.packed.load(Ordering::Acquire);
+            let state = unpack_state_field(current);
 
-        match state {
-            CircuitState::Closed => {
-                // Reset failure count on success
-                *safe_write(&self.failure_count) = 0;
-            }
-            CircuitState::HalfOpen => {
-                // Increment success count and check threshold
-                let should_close = {
-                    let mut success_count = safe_write(&self.success_count);
-                    *success_count += 1;
-                    *success_count >= self.half_open_max_requests
-                };
-
-                // If enough successes, close the circuit
-                if should_close {
-                    *safe_write(&self.state) = CircuitState::Closed;
-                    *safe_write(&self.failure_count) = 0;
-                    *safe_write(&self.success_count) = 0;
-                    *safe_write(&self.last_failure_time) = None;
+            match state {
+                STATE_CLOSED => {
+                    // Reset failure count on success
+                    let new = pack_state(STATE_CLOSED, 0, 0, 0);
+                    if self
+                        .packed
+                        .compare_exchange_weak(current, new, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        return;
+                    }
+                    // CAS failed, retry
                 }
-            }
-            CircuitState::Open => {
-                // Ignore successes in Open state (shouldn't happen)
+                STATE_HALFOPEN => {
+                    let successes = unpack_successes(current) + 1;
+                    let half_open_reqs = unpack_half_open_reqs(current);
+
+                    if successes >= self.half_open_max_requests as u64 {
+                        // Enough successes — close the circuit
+                        let new = pack_state(STATE_CLOSED, 0, 0, 0);
+                        if self
+                            .packed
+                            .compare_exchange_weak(
+                                current,
+                                new,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            // Clear last failure time
+                            self.last_failure_ms.store(0, Ordering::Release);
+                            return;
+                        }
+                    } else {
+                        let failures = unpack_failures(current);
+                        let new = pack_state(STATE_HALFOPEN, failures, successes, half_open_reqs);
+                        if self
+                            .packed
+                            .compare_exchange_weak(
+                                current,
+                                new,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            return;
+                        }
+                    }
+                    // CAS failed, retry
+                }
+                _ => return, // Ignore successes in Open state
             }
         }
     }
 
     /// Record failed request
     pub fn record_failure(&self) {
-        let state = *safe_read(&self.state);
+        // Update last failure time (use micros for sub-millisecond precision, +1 to distinguish from "never failed")
+        let elapsed_us = self.created_at.elapsed().as_micros() as u64 + 1;
+        self.last_failure_ms.store(elapsed_us, Ordering::Release);
 
-        match state {
-            CircuitState::Closed => {
-                // Increment failure count and check threshold
-                let (should_open, now) = {
-                    let mut failure_count = safe_write(&self.failure_count);
-                    *failure_count += 1;
-                    (*failure_count >= self.failure_threshold, Instant::now())
-                };
+        loop {
+            let current = self.packed.load(Ordering::Acquire);
+            let state = unpack_state_field(current);
 
-                // Update last failure time
-                *safe_write(&self.last_failure_time) = Some(now);
-
-                // Open circuit if threshold exceeded
-                if should_open {
-                    *safe_write(&self.state) = CircuitState::Open;
+            match state {
+                STATE_CLOSED => {
+                    let failures = unpack_failures(current) + 1;
+                    if failures >= self.failure_threshold as u64 {
+                        // Trip the circuit
+                        let new = pack_state(STATE_OPEN, failures, 0, 0);
+                        if self
+                            .packed
+                            .compare_exchange_weak(
+                                current,
+                                new,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            return;
+                        }
+                    } else {
+                        let new = pack_state(STATE_CLOSED, failures, 0, 0);
+                        if self
+                            .packed
+                            .compare_exchange_weak(
+                                current,
+                                new,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            return;
+                        }
+                    }
+                    // CAS failed, retry
                 }
-            }
-            CircuitState::HalfOpen => {
-                // Any failure in Half-Open immediately reopens circuit
-                *safe_write(&self.state) = CircuitState::Open;
-                *safe_write(&self.success_count) = 0;
-                *safe_write(&self.half_open_requests) = 0;
-                *safe_write(&self.last_failure_time) = Some(Instant::now());
-            }
-            CircuitState::Open => {
-                // Update last failure time
-                *safe_write(&self.last_failure_time) = Some(Instant::now());
+                STATE_HALFOPEN => {
+                    // Any failure in Half-Open immediately reopens circuit
+                    let new = pack_state(STATE_OPEN, 0, 0, 0);
+                    if self
+                        .packed
+                        .compare_exchange_weak(current, new, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        return;
+                    }
+                    // CAS failed, retry
+                }
+                STATE_OPEN => {
+                    // Already open, just update timestamp (done above)
+                    return;
+                }
+                _ => return,
             }
         }
     }
 
     /// Get current circuit state
     pub fn state(&self) -> CircuitState {
-        *safe_read(&self.state)
+        let packed = self.packed.load(Ordering::Acquire);
+        state_from_u64(unpack_state_field(packed))
     }
 
     /// Get current failure count
-    #[allow(dead_code)] // Part of public API, used in tests
+    #[allow(dead_code)]
     pub fn failure_count(&self) -> u32 {
-        *safe_read(&self.failure_count)
+        let packed = self.packed.load(Ordering::Acquire);
+        unpack_failures(packed) as u32
     }
 
     /// Check if circuit should attempt reset (Open → Half-Open)
     fn should_attempt_reset(&self) -> bool {
-        if let Some(last_failure) = *safe_read(&self.last_failure_time) {
-            last_failure.elapsed() >= self.timeout
+        let last_failure_us = self.last_failure_ms.load(Ordering::Acquire);
+        if last_failure_us == 0 {
+            return false;
+        }
+        // last_failure_us is stored as (elapsed_micros + 1), so subtract 1 to recover actual value
+        let last_failure_duration = Duration::from_micros(last_failure_us - 1);
+        let elapsed_since_creation = self.created_at.elapsed();
+        if elapsed_since_creation > last_failure_duration {
+            let time_since_failure = elapsed_since_creation - last_failure_duration;
+            time_since_failure >= self.timeout
         } else {
             false
         }
@@ -387,20 +535,21 @@ impl CircuitBreaker {
     #[cfg(test)]
     #[allow(dead_code)]
     pub fn reset(&self) {
-        *safe_write(&self.state) = CircuitState::Closed;
-        *safe_write(&self.failure_count) = 0;
-        *safe_write(&self.success_count) = 0;
-        *safe_write(&self.last_failure_time) = None;
-        *safe_write(&self.half_open_requests) = 0;
+        self.packed
+            .store(pack_state(STATE_CLOSED, 0, 0, 0), Ordering::Release);
+        self.last_failure_ms.store(0, Ordering::Release);
     }
 }
 
 /// Per-backend circuit breaker manager
 ///
-/// Manages circuit breakers for multiple backends with automatic cleanup.
+/// Uses `ArcSwap` for lock-free read access to the breaker map on the hot path.
+/// New breakers are created via a serializing `Mutex` (only on first access per backend).
 pub struct CircuitBreakerManager {
-    /// Backend ID -> CircuitBreaker mapping
-    breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
+    /// Backend ID -> CircuitBreaker mapping (lock-free reads via ArcSwap)
+    breakers: ArcSwap<HashMap<String, Arc<CircuitBreaker>>>,
+    /// Serializes writes (new breaker creation) — never held on hot path
+    write_lock: std::sync::Mutex<()>,
     /// Default failure threshold
     default_failure_threshold: u32,
     /// Default timeout
@@ -415,7 +564,8 @@ impl CircuitBreakerManager {
     /// * `timeout` - Default duration before attempting Half-Open
     pub fn new(failure_threshold: u32, timeout: Duration) -> Self {
         Self {
-            breakers: Arc::new(RwLock::new(HashMap::new())),
+            breakers: ArcSwap::from_pointee(HashMap::new()),
+            write_lock: std::sync::Mutex::new(()),
             default_failure_threshold: failure_threshold,
             default_timeout: timeout,
         }
@@ -423,25 +573,35 @@ impl CircuitBreakerManager {
 
     /// Get or create circuit breaker for backend
     pub fn get_breaker(&self, backend_id: &str) -> Arc<CircuitBreaker> {
-        let breakers = safe_read(&self.breakers);
-
-        if let Some(breaker) = breakers.get(backend_id) {
-            Arc::clone(breaker)
-        } else {
-            // Release read lock before acquiring write lock
-            drop(breakers);
-
-            // Create new breaker
-            let breaker = Arc::new(CircuitBreaker::new(
-                self.default_failure_threshold,
-                self.default_timeout,
-            ));
-
-            let mut breakers = safe_write(&self.breakers);
-            breakers.insert(backend_id.to_string(), Arc::clone(&breaker));
-
-            breaker
+        // Fast path: lock-free read (single atomic load, ~1ns)
+        let snapshot = self.breakers.load();
+        if let Some(breaker) = snapshot.get(backend_id) {
+            return Arc::clone(breaker);
         }
+
+        // Slow path: create new breaker (serialized, but only on first access per backend)
+        let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| {
+            warn!("CircuitBreakerManager write_lock poisoned, recovering");
+            poisoned.into_inner()
+        });
+
+        // Double-check after acquiring write lock
+        let snapshot = self.breakers.load();
+        if let Some(breaker) = snapshot.get(backend_id) {
+            return Arc::clone(breaker);
+        }
+
+        let breaker = Arc::new(CircuitBreaker::new(
+            self.default_failure_threshold,
+            self.default_timeout,
+        ));
+
+        // Clone-on-write: clone the map, insert, and atomically swap
+        let mut new_map = (**snapshot).clone();
+        new_map.insert(backend_id.to_string(), Arc::clone(&breaker));
+        self.breakers.store(Arc::new(new_map));
+
+        breaker
     }
 
     /// Check if backend allows requests
@@ -458,11 +618,7 @@ impl CircuitBreakerManager {
             .inc();
 
         // Update state gauge
-        let state_value = match new_state {
-            CircuitState::Closed => 0,
-            CircuitState::Open => 1,
-            CircuitState::HalfOpen => 2,
-        };
+        let state_value = state_to_u64(new_state) as i64;
         CIRCUIT_BREAKER_STATE
             .with_label_values(&[backend_id])
             .set(state_value);
@@ -485,11 +641,7 @@ impl CircuitBreakerManager {
         let new_state = breaker.state();
 
         // Update state gauge
-        let state_value = match new_state {
-            CircuitState::Closed => 0,
-            CircuitState::Open => 1,
-            CircuitState::HalfOpen => 2,
-        };
+        let state_value = state_to_u64(new_state) as i64;
         CIRCUIT_BREAKER_STATE
             .with_label_values(&[backend_id])
             .set(state_value);
@@ -515,11 +667,7 @@ impl CircuitBreakerManager {
             .inc();
 
         // Update state gauge
-        let state_value = match new_state {
-            CircuitState::Closed => 0,
-            CircuitState::Open => 1,
-            CircuitState::HalfOpen => 2,
-        };
+        let state_value = state_to_u64(new_state) as i64;
         CIRCUIT_BREAKER_STATE
             .with_label_values(&[backend_id])
             .set(state_value);
@@ -533,17 +681,24 @@ impl CircuitBreakerManager {
     }
 
     /// Get backend circuit state
-    #[allow(dead_code)] // Part of public API, used in tests
+    #[allow(dead_code)]
     pub fn get_state(&self, backend_id: &str) -> Option<CircuitState> {
-        let breakers = safe_read(&self.breakers);
-        breakers.get(backend_id).map(|b| b.state())
+        let snapshot = self.breakers.load();
+        snapshot.get(backend_id).map(|b| b.state())
     }
 
     /// Remove circuit breaker for backend
-    #[allow(dead_code)] // Part of public API, may be used for cleanup
+    #[allow(dead_code)]
     pub fn remove_backend(&self, backend_id: &str) {
-        let mut breakers = safe_write(&self.breakers);
-        breakers.remove(backend_id);
+        let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| {
+            warn!("CircuitBreakerManager write_lock poisoned, recovering");
+            poisoned.into_inner()
+        });
+
+        let snapshot = self.breakers.load();
+        let mut new_map = (**snapshot).clone();
+        new_map.remove(backend_id);
+        self.breakers.store(Arc::new(new_map));
     }
 }
 
@@ -890,5 +1045,25 @@ mod tests {
 
         // 5. Verify failure count reset
         assert_eq!(breaker.failure_count(), 0);
+    }
+
+    #[test]
+    fn test_packed_state_roundtrip() {
+        // Verify packing/unpacking is correct
+        let packed = pack_state(STATE_OPEN, 42, 7, 3);
+        assert_eq!(unpack_state_field(packed), STATE_OPEN);
+        assert_eq!(unpack_failures(packed), 42);
+        assert_eq!(unpack_successes(packed), 7);
+        assert_eq!(unpack_half_open_reqs(packed), 3);
+
+        let packed2 = pack_state(STATE_CLOSED, 0, 0, 0);
+        assert_eq!(unpack_state_field(packed2), STATE_CLOSED);
+        assert_eq!(unpack_failures(packed2), 0);
+
+        let packed3 = pack_state(STATE_HALFOPEN, 65535, 65535, 65535);
+        assert_eq!(unpack_state_field(packed3), STATE_HALFOPEN);
+        assert_eq!(unpack_failures(packed3), 65535);
+        assert_eq!(unpack_successes(packed3), 65535);
+        assert_eq!(unpack_half_open_reqs(packed3), 65535);
     }
 }

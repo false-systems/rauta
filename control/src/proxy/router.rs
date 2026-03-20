@@ -8,12 +8,14 @@ use crate::proxy::filters::{
     RequestHeaderModifier, RequestRedirect, ResponseHeaderModifier, RetryConfig, Timeout,
 };
 use crate::proxy::health_checker::{HealthCheckConfig, HealthChecker};
+use crate::proxy::route_snapshot::{BackendDraining, HealthData};
+use arc_swap::ArcSwap;
 use common::{fnv1a_hash, maglev_build_compact_table, maglev_lookup_compact, Backend, HttpMethod};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::warn;
 
 // ============================================================================
@@ -70,69 +72,7 @@ pub fn safe_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 // End of safe lock helpers
 // ============================================================================
 
-/// Backend draining state (for graceful removal)
-#[derive(Debug, Clone)]
-struct BackendDraining {
-    /// When this backend should be force-removed
-    #[allow(dead_code)] // Used in cleanup_expired_draining_backends
-    deadline: Instant,
-}
-
-impl BackendDraining {
-    #[allow(dead_code)] // Used in drain_backend()
-    fn new(drain_timeout: Duration) -> Self {
-        Self {
-            deadline: Instant::now() + drain_timeout,
-        }
-    }
-
-    #[allow(dead_code)] // Will be used in future EndpointSlice integration
-    fn is_expired(&self) -> bool {
-        Instant::now() >= self.deadline
-    }
-}
-
-/// Backend health statistics for passive health checking
-#[derive(Debug, Clone)]
-struct BackendHealth {
-    /// Sliding window of last 100 request results: true = 5xx error, false = success
-    window: VecDeque<bool>,
-}
-
-const WINDOW_SIZE: usize = 100;
-
-impl BackendHealth {
-    #[allow(dead_code)] // Used in tests
-    fn new() -> Self {
-        Self {
-            window: VecDeque::with_capacity(WINDOW_SIZE),
-        }
-    }
-
-    /// Check if backend is healthy
-    /// Unhealthy if error rate > 50% in last 100 requests
-    fn is_healthy(&self) -> bool {
-        let total = self.window.len();
-        if total == 0 {
-            return true; // No data yet, assume healthy
-        }
-
-        // If error rate > 50%, mark as unhealthy
-        let error_count = self.window.iter().filter(|&&is_error| is_error).count();
-        let error_rate = error_count as f64 / total as f64;
-        error_rate <= 0.5
-    }
-
-    /// Record a response
-    #[allow(dead_code)] // Used in tests
-    fn record_response(&mut self, status_code: u16) {
-        let is_error = (500..600).contains(&status_code);
-        if self.window.len() == WINDOW_SIZE {
-            self.window.pop_front();
-        }
-        self.window.push_back(is_error);
-    }
-}
+// BackendDraining, BackendHealth, and HealthData are now in route_snapshot.rs
 
 /// Global regex cache for header and query parameter matching
 ///
@@ -195,41 +135,36 @@ fn get_cached_regex(pattern: &str) -> Option<Arc<Regex>> {
 }
 
 /// Route configuration for a path
+///
+/// Filters are wrapped in `Arc` so that constructing a `RouteMatch` is a cheap
+/// `Arc::clone` (~1ns atomic increment) instead of deep-cloning filter vecs.
 struct Route {
-    pattern: Arc<str>, // Original route pattern for metrics (Arc for cheap cloning)
+    pattern: Arc<str>,
     backends: Vec<Backend>,
     maglev_table: Vec<u8>,
-    header_matches: Vec<HeaderMatch>, // Gateway API header matching (empty = no header constraints)
-    #[allow(dead_code)] // Used in GREEN phase
-    method_matches: Option<Vec<HttpMethod>>, // Gateway API method matching (None = match all methods)
-    #[allow(dead_code)] // Used in GREEN phase for Feature 3
-    query_param_matches: Vec<QueryParamMatch>, // Gateway API query parameter matching (empty = no constraints)
-    #[allow(dead_code)] // Used in GREEN phase for Feature 4
-    request_filters: Option<RequestHeaderModifier>, // Gateway API request header filters
-    #[allow(dead_code)] // Used in GREEN phase for Feature 5
-    response_filters: Option<ResponseHeaderModifier>, // Gateway API response header filters
-    #[allow(dead_code)] // Used in GREEN phase for Feature 6
-    redirect: Option<RequestRedirect>, // Gateway API redirect filter (Core feature)
-    #[allow(dead_code)] // Used in GREEN phase for Feature 7
-    timeout: Option<Timeout>, // Gateway API timeout configuration (Extended feature)
-    #[allow(dead_code)] // Used in GREEN phase for Feature 8
-    retry: Option<RetryConfig>, // Gateway API retry configuration (Extended feature)
+    header_matches: Vec<HeaderMatch>,
+    #[allow(dead_code)]
+    method_matches: Option<Vec<HttpMethod>>,
+    #[allow(dead_code)]
+    query_param_matches: Vec<QueryParamMatch>,
+    request_filters: Option<Arc<RequestHeaderModifier>>,
+    response_filters: Option<Arc<ResponseHeaderModifier>>,
+    redirect: Option<Arc<RequestRedirect>>,
+    timeout: Option<Arc<Timeout>>,
+    retry: Option<Arc<RetryConfig>>,
 }
 
 /// Route match result (backend + pattern for metrics)
+///
+/// All filter fields are `Arc`-wrapped for zero-cost cloning from `Route`.
 pub struct RouteMatch {
     pub backend: Backend,
-    pub pattern: Arc<str>, // Arc<str> for zero-cost clone on hot path
-    #[allow(dead_code)] // Used in server.rs to apply filters during proxying
-    pub request_filters: Option<RequestHeaderModifier>,
-    #[allow(dead_code)] // Used in server.rs to apply filters after backend response
-    pub response_filters: Option<ResponseHeaderModifier>,
-    #[allow(dead_code)] // Used in server.rs to send redirect response
-    pub redirect: Option<RequestRedirect>,
-    #[allow(dead_code)] // Used in server.rs to enforce request/backend timeouts
-    pub timeout: Option<Timeout>,
-    #[allow(dead_code)] // Used in server.rs for retry logic
-    pub retry: Option<RetryConfig>,
+    pub pattern: Arc<str>,
+    pub request_filters: Option<Arc<RequestHeaderModifier>>,
+    pub response_filters: Option<Arc<ResponseHeaderModifier>>,
+    pub redirect: Option<Arc<RequestRedirect>>,
+    pub timeout: Option<Arc<Timeout>>,
+    pub retry: Option<Arc<RetryConfig>>,
 }
 
 /// Header match type for Gateway API conformance
@@ -288,14 +223,15 @@ struct RouteKey {
 /// - Prefix match via matchit radix tree (O(log n) for prefixes)
 /// - Passive health checking (circuit breaker for unhealthy backends)
 /// - Active health checking (TCP probes with Prometheus metrics)
-/// - Route LRU cache for O(1) repeated lookups
+///
+/// Health data uses `ArcSwap` for lock-free reads on the hot path.
+/// Route data still uses `RwLock` (read-heavy, rarely written by K8s reconcilers).
 pub struct Router {
     routes: Arc<RwLock<HashMap<RouteKey, Route>>>,
     prefix_router: Arc<RwLock<matchit::Router<RouteKey>>>,
-    /// Backends marked for draining (graceful removal)
-    draining_backends: Arc<RwLock<HashMap<Backend, BackendDraining>>>,
-    /// Backend health tracking (supports both IPv4 and IPv6)
-    backend_health: Arc<RwLock<HashMap<Backend, BackendHealth>>>,
+    /// Lock-free health data (backend health + draining state)
+    /// ArcSwap::load() is a single atomic load (~1ns) vs RwLock::read() (~20ns)
+    health: ArcSwap<HealthData>,
     /// Active health checker (TCP probes)
     health_checker: Arc<HealthChecker>,
     /// Route lookup cache: (method, path_hash) -> RouteKey
@@ -411,8 +347,7 @@ impl Default for Router {
         Self {
             routes: Arc::new(RwLock::new(HashMap::new())),
             prefix_router: Arc::new(RwLock::new(matchit::Router::new())),
-            draining_backends: Arc::new(RwLock::new(HashMap::new())),
-            backend_health: Arc::new(RwLock::new(HashMap::new())),
+            health: ArcSwap::from_pointee(HealthData::new()),
             health_checker: Arc::new(HealthChecker::new(HealthCheckConfig::default(), &registry)),
             route_cache: Arc::new(RwLock::new(RouteLruCache::new(ROUTE_CACHE_MAX_SIZE))),
         }
@@ -437,8 +372,7 @@ impl Router {
         Self {
             routes: Arc::new(RwLock::new(HashMap::new())),
             prefix_router: Arc::new(RwLock::new(matchit::Router::new())),
-            draining_backends: Arc::new(RwLock::new(HashMap::new())),
-            backend_health: Arc::new(RwLock::new(HashMap::new())),
+            health: ArcSwap::from_pointee(HealthData::new()),
             health_checker: Arc::new(HealthChecker::new(health_config, registry)),
             route_cache: Arc::new(RwLock::new(RouteLruCache::new(ROUTE_CACHE_MAX_SIZE))),
         }
@@ -616,8 +550,13 @@ impl Router {
     /// **Supports both IPv4 and IPv6** backends.
     #[allow(dead_code)] // Used in tests and future EndpointSlice integration
     pub fn drain_backend(&self, backend: Backend, drain_timeout: Duration) {
-        let mut draining = safe_write(&self.draining_backends);
-        draining.insert(backend, BackendDraining::new(drain_timeout));
+        // Clone-modify-swap via ArcSwap (lock-free for readers)
+        let current = self.health.load();
+        let mut new_health = (**current).clone();
+        new_health
+            .draining_backends
+            .insert(backend, BackendDraining::new(drain_timeout));
+        self.health.store(Arc::new(new_health));
     }
 
     /// Check if backend is marked for draining
@@ -625,27 +564,34 @@ impl Router {
     /// **Supports both IPv4 and IPv6** backends.
     #[allow(dead_code)] // Used in tests
     pub fn is_backend_draining(&self, backend: Backend) -> bool {
-        let draining = safe_read(&self.draining_backends);
-        draining.contains_key(&backend)
+        // Lock-free read via ArcSwap::load() (~1ns atomic load)
+        let health = self.health.load();
+        health.draining_backends.contains_key(&backend)
     }
 
     /// Clean up expired draining backends
     #[allow(dead_code)] // Will be used in EndpointSlice watcher integration
     fn cleanup_expired_draining_backends(&self) {
-        let mut draining = safe_write(&self.draining_backends);
-        draining.retain(|_ip, state| !state.is_expired());
+        let current = self.health.load();
+        let mut new_health = (**current).clone();
+        new_health
+            .draining_backends
+            .retain(|_ip, state| !state.is_expired());
+        self.health.store(Arc::new(new_health));
     }
 
     /// Record backend response for passive health checking
     ///
     /// Tracks success (2xx-4xx) and error (5xx) responses per backend.
-    /// Used to calculate error rate and exclude unhealthy backends.
+    /// Uses ArcSwap clone-modify-swap for lock-free reads on the hot path.
     ///
     /// **Supports both IPv4 and IPv6** backends.
     pub fn record_backend_response(&self, backend: Backend, status_code: u16) {
-        let mut health = safe_write(&self.backend_health);
-        let backend_health = health.entry(backend).or_insert_with(BackendHealth::new);
+        let current = self.health.load();
+        let mut new_health = (**current).clone();
+        let backend_health = new_health.backend_health.entry(backend).or_default();
         backend_health.record_response(status_code);
+        self.health.store(Arc::new(new_health));
     }
 
     /// Select backend for request
@@ -745,51 +691,62 @@ impl Router {
         // Use flow hash (path + src_ip + src_port) for Maglev lookup
         let flow_hash = self.compute_flow_hash(path_hash, src_ip, src_port);
 
-        // Try up to all backends to find one that is BOTH healthy AND not draining
-        let health = safe_read(&self.backend_health);
-        let draining = safe_read(&self.draining_backends);
+        // Lock-free health data read via ArcSwap::load() (~1ns atomic load)
+        // This replaces 2 separate RwLock reads (backend_health + draining_backends)
+        let health_snapshot = self.health.load();
 
-        // Track which backend indices we've tried to avoid infinite loops
-        let mut tried_indices = HashSet::new();
+        // Track which backend indices we've tried using a bitmask (zero allocation).
+        // MAX_BACKENDS=32, so a u32 covers all possible indices.
+        let mut tried_mask: u32 = 0;
+        let mut tried_count: usize = 0;
+        let num_backends = route.backends.len();
 
-        for attempt in 0..route.backends.len() * 10 {
+        for attempt in 0..num_backends * 10 {
             let lookup_hash = flow_hash.wrapping_add(attempt as u64);
             let backend_idx = maglev_lookup_compact(lookup_hash, &route.maglev_table);
 
-            // Skip if we've already tried this backend
-            if tried_indices.contains(&backend_idx) {
+            // Skip if we've already tried this backend (bitmask check: O(1), zero allocation)
+            let bit = 1u32 << (backend_idx & 31);
+            if tried_mask & bit != 0 {
                 continue;
             }
-            tried_indices.insert(backend_idx);
+            tried_mask |= bit;
+            tried_count += 1;
 
             let backend = route.backends.get(backend_idx as usize).copied()?;
 
             // Check if backend is healthy (passive health checking)
-            let is_healthy_passive = health.get(&backend).map(|h| h.is_healthy()).unwrap_or(true); // Default to healthy if no health data
+            // Uses lock-free ArcSwap snapshot loaded above
+            let is_healthy_passive = health_snapshot
+                .backend_health
+                .get(&backend)
+                .map(|h| h.is_healthy())
+                .unwrap_or(true);
 
             // Check if backend is healthy (active health checking via TCP probes)
             let is_healthy_active = self.health_checker.is_healthy(&backend);
 
             // Check if backend is draining (connection draining)
-            let is_draining = draining.contains_key(&backend);
+            let is_draining = health_snapshot.draining_backends.contains_key(&backend);
 
             // Skip if unhealthy (passive OR active) OR draining
             if !is_healthy_passive || !is_healthy_active || is_draining {
-                if tried_indices.len() == route.backends.len() {
+                if tried_count == num_backends {
                     break; // All backends tried
                 }
                 continue;
             }
 
             // Found a healthy, non-draining backend
+            // Arc::clone is ~1ns (atomic increment) — zero deep copying of filter data
             return Some(RouteMatch {
                 backend,
                 pattern: Arc::clone(&route.pattern),
-                request_filters: route.request_filters.clone(),
-                response_filters: route.response_filters.clone(),
-                redirect: route.redirect.clone(),
-                timeout: route.timeout.clone(),
-                retry: route.retry.clone(),
+                request_filters: route.request_filters.as_ref().map(Arc::clone),
+                response_filters: route.response_filters.as_ref().map(Arc::clone),
+                redirect: route.redirect.as_ref().map(Arc::clone),
+                timeout: route.timeout.as_ref().map(Arc::clone),
+                retry: route.retry.as_ref().map(Arc::clone),
             });
         }
 
@@ -1066,7 +1023,7 @@ impl Router {
             header_matches: Vec::new(),      // No header constraints
             method_matches: None,            // No method constraints
             query_param_matches: Vec::new(), // No query param constraints
-            request_filters: Some(filters),  // Store filters for server.rs to apply
+            request_filters: Some(Arc::new(filters)), // Store filters for server.rs to apply
             response_filters: None,          // No response header filters
             redirect: None,                  // No redirect filter
             timeout: None,                   // No timeout configuration
@@ -1135,10 +1092,10 @@ impl Router {
             method_matches: None,            // No method constraints
             query_param_matches: Vec::new(), // No query param constraints
             request_filters: None,           // No request header filters
-            response_filters: Some(filters), // Store filters for server.rs to apply after backend response
-            redirect: None,                  // No redirect filter
-            timeout: None,                   // No timeout configuration
-            retry: None,                     // No retry configuration
+            response_filters: Some(Arc::new(filters)), // Store filters for server.rs to apply after backend response
+            redirect: None,                            // No redirect filter
+            timeout: None,                             // No timeout configuration
+            retry: None,                               // No retry configuration
         };
 
         // Update routes HashMap
@@ -1204,9 +1161,9 @@ impl Router {
             query_param_matches: Vec::new(), // No query param constraints
             request_filters: None,           // No request header filters
             response_filters: None,          // No response header filters
-            redirect: Some(redirect_filter), // Store redirect filter for server.rs to apply
-            timeout: None,                   // No timeout configuration
-            retry: None,                     // No retry configuration
+            redirect: Some(Arc::new(redirect_filter)), // Store redirect filter for server.rs to apply
+            timeout: None,                             // No timeout configuration
+            retry: None,                               // No retry configuration
         };
 
         // Update routes HashMap
@@ -1275,8 +1232,8 @@ impl Router {
             request_filters: None,           // No request header filters
             response_filters: None,          // No response header filters
             redirect: None,                  // No redirect filter
-            timeout: Some(timeout_config),   // Store timeout config for server.rs to enforce
-            retry: None,                     // No retry configuration
+            timeout: Some(Arc::new(timeout_config)), // Store timeout config for server.rs to enforce
+            retry: None,                             // No retry configuration
         };
 
         // Update routes HashMap
@@ -1346,7 +1303,7 @@ impl Router {
             response_filters: None,
             redirect: None,
             timeout: None,
-            retry: Some(retry_config), // Store retry config for server.rs to use
+            retry: Some(Arc::new(retry_config)), // Store retry config for server.rs to use
         };
 
         // Update routes HashMap
@@ -1446,8 +1403,7 @@ impl Router {
         // Headers match (or no header constraints) - select backend using Maglev
         let flow_hash = self.compute_flow_hash(path_hash, src_ip, src_port);
 
-        let health = safe_read(&self.backend_health);
-        let draining = safe_read(&self.draining_backends);
+        let health_snapshot = self.health.load();
         let mut tried_indices = HashSet::new();
 
         for attempt in 0..route.backends.len() * 10 {
@@ -1461,9 +1417,13 @@ impl Router {
 
             let backend = route.backends.get(backend_idx as usize).copied()?;
 
-            let is_healthy = health.get(&backend).map(|h| h.is_healthy()).unwrap_or(true);
+            let is_healthy = health_snapshot
+                .backend_health
+                .get(&backend)
+                .map(|h| h.is_healthy())
+                .unwrap_or(true);
 
-            let is_draining = draining.contains_key(&backend);
+            let is_draining = health_snapshot.draining_backends.contains_key(&backend);
 
             if !is_healthy || is_draining {
                 if tried_indices.len() == route.backends.len() {
@@ -1546,8 +1506,7 @@ impl Router {
         // Query params match (or no query param constraints) - select backend using Maglev
         let flow_hash = self.compute_flow_hash(path_hash, src_ip, src_port);
 
-        let health = safe_read(&self.backend_health);
-        let draining = safe_read(&self.draining_backends);
+        let health_snapshot = self.health.load();
         let mut tried_indices = HashSet::new();
 
         for attempt in 0..route.backends.len() * 10 {
@@ -1561,9 +1520,13 @@ impl Router {
 
             let backend = route.backends.get(backend_idx as usize).copied()?;
 
-            let is_healthy = health.get(&backend).map(|h| h.is_healthy()).unwrap_or(true);
+            let is_healthy = health_snapshot
+                .backend_health
+                .get(&backend)
+                .map(|h| h.is_healthy())
+                .unwrap_or(true);
 
-            let is_draining = draining.contains_key(&backend);
+            let is_draining = health_snapshot.draining_backends.contains_key(&backend);
 
             if !is_healthy || is_draining {
                 if tried_indices.len() == route.backends.len() {

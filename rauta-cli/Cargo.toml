@@ -1,0 +1,24 @@
+[package]
+name = "rauta-cli"
+version = "0.1.0"
+edition = "2021"
+description = "RAUTA CLI and kubectl plugin for gateway management"
+
+[[bin]]
+name = "rauta"
+path = "src/main.rs"
+
+[[bin]]
+name = "kubectl-rauta"
+path = "src/main.rs"
+
+[dependencies]
+agent-api = { path = "../agent-api" }
+clap = { version = "4", features = ["derive", "env"] }
+comfy-table = "7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"
+anyhow = "1.0"

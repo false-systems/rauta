@@ -369,7 +369,7 @@ pub async fn handle_request(
             );
 
             // Apply response filters and return
-            finalize_response(result, route_match.response_filters.as_ref(), &request_id)
+            finalize_response(result, route_match.response_filters.as_deref(), &request_id)
         }
         None => {
             let duration = start.elapsed();
@@ -498,8 +498,8 @@ async fn execute_request_with_retry(
     workers: Option<Workers>,
     worker_index: Option<usize>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
-    let overall_request_timeout = route_match.timeout.as_ref().and_then(|t| t.request);
-    let retry_config = route_match.retry.as_ref();
+    let overall_request_timeout = route_match.timeout.as_deref().and_then(|t| t.request);
+    let retry_config = route_match.retry.as_deref();
     let is_retryable_method =
         method == common::HttpMethod::GET || method == common::HttpMethod::HEAD;
 
@@ -553,6 +553,9 @@ async fn execute_with_retry(
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
     let max_attempts = retry_cfg.max_retries + 1;
 
+    // Save original headers for retry requests (fix: retry was dropping all headers except Host)
+    let original_headers = req.headers().clone();
+
     // First attempt
     let first_result = if let Some(timeout_duration) = overall_timeout {
         match tokio::time::timeout(
@@ -566,7 +569,7 @@ async fn execute_with_retry(
                 protocol_cache.clone(),
                 workers.clone(),
                 worker_index,
-                route_match.timeout.as_ref(),
+                route_match.timeout.as_deref(),
             ),
         )
         .await
@@ -587,7 +590,7 @@ async fn execute_with_retry(
             protocol_cache.clone(),
             workers.clone(),
             worker_index,
-            route_match.timeout.as_ref(),
+            route_match.timeout.as_deref(),
         )
         .await
     };
@@ -629,12 +632,19 @@ async fn execute_with_retry(
             _ => hyper::Method::GET,
         };
 
-        let retry_req = match Request::builder()
-            .method(retry_method)
-            .uri(&backend_uri)
-            .header("Host", route_match.backend.to_string())
-            .body(Full::new(Bytes::new()))
-        {
+        // Build retry request preserving original headers (Auth, Content-Type, etc.)
+        let mut retry_builder = Request::builder().method(retry_method).uri(&backend_uri);
+
+        // Copy all original headers except Host (we'll set backend Host) and hop-by-hop headers
+        for (name, value) in original_headers.iter() {
+            let name_str = name.as_str();
+            if name_str != "host" && !crate::proxy::forwarder::is_hop_by_hop_header(name_str) {
+                retry_builder = retry_builder.header(name, value);
+            }
+        }
+        retry_builder = retry_builder.header("Host", route_match.backend.to_string());
+
+        let retry_req = match retry_builder.body(Full::new(Bytes::new())) {
             Ok(r) => r,
             Err(e) => {
                 last_result = Err(format!("Failed to build retry request: {}", e));
@@ -691,7 +701,7 @@ async fn execute_without_retry(
                 protocol_cache,
                 workers,
                 worker_index,
-                route_match.timeout.as_ref(),
+                route_match.timeout.as_deref(),
             ),
         )
         .await
@@ -719,7 +729,7 @@ async fn execute_without_retry(
             protocol_cache,
             workers,
             worker_index,
-            route_match.timeout.as_ref(),
+            route_match.timeout.as_deref(),
         )
         .await
     }

@@ -1,0 +1,15 @@
+[package]
+name = "mcp-server"
+version = "0.1.0"
+edition = "2021"
+description = "RAUTA MCP server for AI agent integration"
+
+[dependencies]
+agent-api = { path = "../agent-api" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+schemars = "0.8"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+anyhow = "1.0"
+tracing = "0.1"
