@@ -405,6 +405,74 @@ impl Router {
         routes.len()
     }
 
+    /// List all configured routes as agent-api snapshots
+    ///
+    /// Reads the route table under a brief read lock and converts internal
+    /// Route structs to public RouteSnapshot types for the admin API/CLI/MCP.
+    pub fn list_routes(&self) -> Vec<agent_api::types::RouteSnapshot> {
+        let routes = safe_read(&self.routes);
+        let health_snapshot = self.health.load();
+
+        routes
+            .iter()
+            .map(|(key, route)| {
+                let method_str = match key.method {
+                    HttpMethod::GET => "GET",
+                    HttpMethod::POST => "POST",
+                    HttpMethod::PUT => "PUT",
+                    HttpMethod::DELETE => "DELETE",
+                    HttpMethod::HEAD => "HEAD",
+                    HttpMethod::OPTIONS => "OPTIONS",
+                    HttpMethod::PATCH => "PATCH",
+                    HttpMethod::ALL => "ALL",
+                };
+
+                let backends = route
+                    .backends
+                    .iter()
+                    .map(|b| {
+                        let address = if b.is_ipv6() {
+                            b.as_ipv6()
+                                .map(|ip| format!("[{}]", ip))
+                                .unwrap_or_default()
+                        } else {
+                            b.as_ipv4().map(|ip| ip.to_string()).unwrap_or_default()
+                        };
+
+                        let is_draining = health_snapshot.draining_backends.contains_key(b);
+                        let health_score = health_snapshot.backend_health.get(b).map(|h| {
+                            if h.is_healthy() {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        });
+
+                        agent_api::types::BackendSnapshot {
+                            address,
+                            port: b.port,
+                            weight: b.weight,
+                            is_ipv6: b.is_ipv6(),
+                            is_draining,
+                            health_score,
+                        }
+                    })
+                    .collect();
+
+                agent_api::types::RouteSnapshot {
+                    pattern: route.pattern.to_string(),
+                    method: method_str.to_string(),
+                    backends,
+                    has_request_filters: route.request_filters.is_some(),
+                    has_response_filters: route.response_filters.is_some(),
+                    has_redirect: route.redirect.is_some(),
+                    has_timeout: route.timeout.is_some(),
+                    has_retry: route.retry.is_some(),
+                }
+            })
+            .collect()
+    }
+
     /// Add or update route with backends (idempotent)
     ///
     /// If the route already exists with the same backends, this is a no-op.

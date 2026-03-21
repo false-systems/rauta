@@ -687,6 +687,30 @@ impl CircuitBreakerManager {
         snapshot.get(backend_id).map(|b| b.state())
     }
 
+    /// Snapshot all circuit breakers for the admin API/CLI/MCP
+    ///
+    /// Lock-free read via ArcSwap::load(). Returns a snapshot of all tracked backends.
+    pub fn snapshot_all(&self) -> Vec<agent_api::types::CircuitBreakerSnapshot> {
+        let snapshot = self.breakers.load();
+        snapshot
+            .iter()
+            .map(|(id, breaker)| agent_api::types::CircuitBreakerSnapshot {
+                backend_id: id.clone(),
+                state: state_to_str(breaker.state()).to_string(),
+                failure_count: breaker.failure_count(),
+            })
+            .collect()
+    }
+
+    /// Count circuit breakers in Open state
+    pub fn open_count(&self) -> usize {
+        let snapshot = self.breakers.load();
+        snapshot
+            .values()
+            .filter(|b| b.state() == CircuitState::Open)
+            .count()
+    }
+
     /// Remove circuit breaker for backend
     #[allow(dead_code)]
     pub fn remove_backend(&self, backend_id: &str) {
