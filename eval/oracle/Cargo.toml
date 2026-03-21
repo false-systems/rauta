@@ -1,0 +1,27 @@
+# Oracle is NOT a workspace member. Built independently.
+#
+# The oracle encodes ground truth about RAUTA's external behavior.
+# It connects to a live gateway instance, exercises every public interface
+# (proxy, admin API, metrics), and asserts that behavior matches contract.
+#
+# Run: cargo test --manifest-path eval/oracle/Cargo.toml -- --nocapture
+# Run one: cargo test --manifest-path eval/oracle/Cargo.toml -- case_004 --nocapture
+
+[package]
+name = "rauta-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Declare as its own workspace so cargo doesn't look for parent
+[workspace]
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+hyper = { version = "1.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy"] }
+http-body-util = "0.1"
