@@ -262,6 +262,16 @@ impl TokenBucket {
         fixed_to_float(tokens).min(self.capacity_f64)
     }
 
+    /// Get burst capacity
+    pub fn capacity(&self) -> f64 {
+        self.capacity_f64
+    }
+
+    /// Get refill rate in tokens per second
+    pub fn refill_rate(&self) -> f64 {
+        fixed_to_float(self.refill_rate_per_ms_fixed) * 1000.0
+    }
+
     /// Reset bucket to full capacity (for testing)
     #[cfg(test)]
     #[allow(dead_code)]
@@ -362,6 +372,29 @@ impl RateLimiter {
     pub fn available_tokens(&self, route: &str) -> Option<f64> {
         let snapshot = self.buckets.load();
         snapshot.get(route).map(|bucket| bucket.available_tokens())
+    }
+
+    /// Snapshot all rate limiter buckets for the admin API/CLI/MCP
+    pub fn snapshot_all(&self) -> Vec<agent_api::types::RateLimiterSnapshot> {
+        let snapshot = self.buckets.load();
+        snapshot
+            .iter()
+            .map(|(route, bucket)| agent_api::types::RateLimiterSnapshot {
+                route: route.clone(),
+                tokens_available: bucket.available_tokens(),
+                capacity: bucket.capacity(),
+                refill_rate: bucket.refill_rate(),
+            })
+            .collect()
+    }
+
+    /// Count buckets with zero tokens (actively rate limiting)
+    pub fn exhausted_count(&self) -> usize {
+        let snapshot = self.buckets.load();
+        snapshot
+            .values()
+            .filter(|b| b.available_tokens() <= 0.0)
+            .count()
     }
 }
 

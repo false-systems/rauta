@@ -14,23 +14,25 @@ pub enum RautaError {
     Io(#[from] std::io::Error),
 }
 
-/// Proxy request errors with structured discrimination (replaces string-based error matching)
-#[allow(dead_code)]
+/// Proxy request errors with structured discrimination
+///
+/// Replaces string-based error matching (`e.starts_with("TIMEOUT:")`) with
+/// proper enum variants. Each variant maps to a specific HTTP status code.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ProxyError {
-    /// Backend request or overall request timeout exceeded
+    /// Backend request or overall request timeout exceeded → 504
     Timeout { message: String },
-    /// Backend connection or protocol error
+    /// Backend connection or protocol error → 502
     BackendError { message: String },
-    /// Request body too large
+    /// Request body too large → 413
     BodyTooLarge { size: usize, max: usize },
-    /// Filter application failed
+    /// Filter application failed → 500
     FilterError { message: String },
 }
 
 #[allow(dead_code)]
 impl ProxyError {
-    /// HTTP status code for this error
     pub fn status_code(&self) -> u16 {
         match self {
             ProxyError::Timeout { .. } => 504,
@@ -43,17 +45,35 @@ impl ProxyError {
     pub fn is_timeout(&self) -> bool {
         matches!(self, ProxyError::Timeout { .. })
     }
+
+    pub fn status_str(&self) -> &'static str {
+        match self {
+            ProxyError::Timeout { .. } => "504",
+            ProxyError::BackendError { .. } => "502",
+            ProxyError::BodyTooLarge { .. } => "413",
+            ProxyError::FilterError { .. } => "500",
+        }
+    }
 }
 
 impl std::fmt::Display for ProxyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProxyError::Timeout { message } => write!(f, "TIMEOUT: {}", message),
+            ProxyError::Timeout { message } => write!(f, "{}", message),
             ProxyError::BackendError { message } => write!(f, "{}", message),
             ProxyError::BodyTooLarge { size, max } => {
                 write!(f, "Request body too large: {} bytes (max {})", size, max)
             }
-            ProxyError::FilterError { message } => write!(f, "Filter error: {}", message),
+            ProxyError::FilterError { message } => write!(f, "{}", message),
         }
+    }
+}
+
+impl std::error::Error for ProxyError {}
+
+/// Allow `?` on String errors (legacy compatibility during migration)
+impl From<String> for ProxyError {
+    fn from(s: String) -> Self {
+        ProxyError::BackendError { message: s }
     }
 }

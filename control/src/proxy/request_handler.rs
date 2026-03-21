@@ -4,6 +4,7 @@
 //! filter application, and response generation.
 
 use crate::apis::metrics::CONTROLLER_METRICS_REGISTRY;
+use crate::error::ProxyError;
 use crate::proxy::backend_pool::gather_pool_metrics;
 use crate::proxy::circuit_breaker::CircuitBreakerManager;
 use crate::proxy::filters::{
@@ -130,7 +131,7 @@ pub fn apply_response_filters<B>(
 pub fn build_redirect_response(
     req: &Request<hyper::body::Incoming>,
     redirect: &RequestRedirect,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     let uri = req.uri();
 
     // Extract components with fallbacks
@@ -173,7 +174,9 @@ pub fn build_redirect_response(
                 .map_err(|never| match never {})
                 .boxed(),
         )
-        .map_err(|e| format!("Failed to build redirect response: {}", e))
+        .map_err(|e| ProxyError::BackendError {
+            message: format!("Failed to build redirect response: {}", e),
+        })
 }
 
 /// Convert HttpMethod to static string (zero allocations)
@@ -224,7 +227,7 @@ pub async fn handle_request(
     worker_selector: Option<Arc<WorkerSelector>>,
     rate_limiter: Arc<RateLimiter>,
     circuit_breaker: Arc<CircuitBreakerManager>,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     // Generate or extract request ID
     let request_id = req
         .headers()
@@ -380,7 +383,7 @@ pub async fn handle_request(
 }
 
 /// Serve the /metrics endpoint
-async fn serve_metrics_endpoint() -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+async fn serve_metrics_endpoint() -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     // Force initialization of lazy_static metrics
     let _ = &*HTTP_REQUEST_DURATION;
     let _ = &*HTTP_REQUESTS_TOTAL;
@@ -441,7 +444,7 @@ async fn serve_metrics_endpoint() -> Result<Response<BoxBody<Bytes, hyper::Error
 ///
 /// Returns 200 OK with minimal body. This endpoint is hit frequently by
 /// K8s liveness/readiness probes, so it should be fast and allocation-light.
-fn serve_healthz_endpoint() -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+fn serve_healthz_endpoint() -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     #[allow(clippy::unwrap_used)]
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -462,7 +465,7 @@ fn serve_healthz_endpoint() -> Result<Response<BoxBody<Bytes, hyper::Error>>, St
 /// - routes: number of configured routes
 fn serve_status_endpoint(
     router: &Router,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     let uptime = START_TIME.elapsed().as_secs();
     let routes = router.route_count();
 
@@ -497,7 +500,7 @@ async fn execute_request_with_retry(
     protocol_cache: ProtocolCache,
     workers: Option<Workers>,
     worker_index: Option<usize>,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     let overall_request_timeout = route_match.timeout.as_deref().and_then(|t| t.request);
     let retry_config = route_match.retry.as_deref();
     let is_retryable_method =
@@ -550,7 +553,7 @@ async fn execute_with_retry(
     overall_timeout: Option<std::time::Duration>,
     retry_cfg: &RetryConfig,
     method: common::HttpMethod,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     let max_attempts = retry_cfg.max_retries + 1;
 
     // Save original headers for retry requests (fix: retry was dropping all headers except Host)
@@ -575,10 +578,12 @@ async fn execute_with_retry(
         .await
         {
             Ok(result) => result,
-            Err(_elapsed) => Err(format!(
-                "TIMEOUT: Request exceeded {}ms overall timeout",
-                timeout_duration.as_millis()
-            )),
+            Err(_elapsed) => Err(ProxyError::Timeout {
+                message: format!(
+                    "Request exceeded {}ms overall timeout",
+                    timeout_duration.as_millis()
+                ),
+            }),
         }
     } else {
         forward_to_backend(
@@ -653,7 +658,9 @@ async fn execute_with_retry(
         let retry_req = match retry_builder.body(Full::new(Bytes::new())) {
             Ok(r) => r,
             Err(e) => {
-                last_result = Err(format!("Failed to build retry request: {}", e));
+                last_result = Err(ProxyError::BackendError {
+                    message: format!("Failed to build retry request: {}", e),
+                });
                 break;
             }
         };
@@ -663,7 +670,9 @@ async fn execute_with_retry(
                 let (parts, body) = resp.into_parts();
                 Ok(Response::from_parts(parts, body.map_err(|e| e).boxed()))
             }
-            Err(e) => Err(format!("Retry request failed: {}", e)),
+            Err(e) => Err(ProxyError::BackendError {
+                message: format!("Retry request failed: {}", e),
+            }),
         };
 
         let should_continue = match &retry_result {
@@ -694,7 +703,7 @@ async fn execute_without_retry(
     workers: Option<Workers>,
     worker_index: Option<usize>,
     overall_timeout: Option<std::time::Duration>,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     if let Some(timeout_duration) = overall_timeout {
         match tokio::time::timeout(
             timeout_duration,
@@ -719,10 +728,12 @@ async fn execute_without_retry(
                     timeout_ms = timeout_duration.as_millis(),
                     "Overall request timeout exceeded"
                 );
-                Err(format!(
-                    "TIMEOUT: Request exceeded {}ms overall timeout",
-                    timeout_duration.as_millis()
-                ))
+                Err(ProxyError::Timeout {
+                    message: format!(
+                        "Request exceeded {}ms overall timeout",
+                        timeout_duration.as_millis()
+                    ),
+                })
             }
         }
     } else {
@@ -744,7 +755,7 @@ async fn execute_without_retry(
 /// Record request metrics
 #[allow(clippy::too_many_arguments)]
 fn record_request_metrics(
-    result: &Result<Response<BoxBody<Bytes, hyper::Error>>, String>,
+    result: &Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError>,
     method: common::HttpMethod,
     route_pattern: &str,
     worker_index: Option<usize>,
@@ -780,12 +791,9 @@ fn record_request_metrics(
                 circuit_breaker.record_success(backend_id);
             }
         }
-        Err(e) => {
-            let (status_code, status_str) = if e.starts_with("TIMEOUT:") {
-                (504_u16, "504")
-            } else {
-                (500_u16, "500")
-            };
+        Err(ref e) => {
+            let status_code = e.status_code();
+            let status_str = e.status_str();
 
             HTTP_REQUESTS_TOTAL
                 .with_label_values(&[method_str, route_pattern, status_str, &worker_label])
@@ -837,10 +845,10 @@ fn record_not_found_metrics(
 
 /// Finalize response with optional response filters
 fn finalize_response(
-    result: Result<Response<BoxBody<Bytes, hyper::Error>>, String>,
+    result: Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError>,
     response_filters: Option<&ResponseHeaderModifier>,
     request_id: &str,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     if let Some(filters) = response_filters {
         match result {
             Ok(mut resp) => {
@@ -864,16 +872,13 @@ fn finalize_response(
     }
 }
 
-/// Convert error string to HTTP response
+/// Convert ProxyError to HTTP response
 fn error_to_response(
-    error: String,
+    error: ProxyError,
     request_id: &str,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
-    let status = if error.starts_with("TIMEOUT:") {
-        StatusCode::GATEWAY_TIMEOUT
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
-    };
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
+    let status =
+        StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
     #[allow(clippy::unwrap_used)]
     Ok(Response::builder()
@@ -881,7 +886,7 @@ fn error_to_response(
         .header("Content-Type", "text/plain")
         .header("X-Request-ID", request_id)
         .body(
-            Full::new(Bytes::from(error))
+            Full::new(Bytes::from(error.to_string()))
                 .map_err(|never| match never {})
                 .boxed(),
         )
@@ -892,7 +897,7 @@ fn error_to_response(
 fn build_error_response(
     status: StatusCode,
     message: String,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     #[allow(clippy::unwrap_used)]
     Ok(Response::builder()
         .status(status)
@@ -908,7 +913,7 @@ fn build_error_response(
 /// Build 404 not found response
 fn build_not_found_response(
     request_id: &str,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     #[allow(clippy::unwrap_used)]
     Ok(Response::builder()
         .status(StatusCode::NOT_FOUND)
@@ -922,7 +927,7 @@ fn build_not_found_response(
 }
 
 /// Build rate limit exceeded response
-fn build_rate_limit_response() -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+fn build_rate_limit_response() -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     #[allow(clippy::unwrap_used)]
     Ok(Response::builder()
         .status(StatusCode::TOO_MANY_REQUESTS)
@@ -937,7 +942,7 @@ fn build_rate_limit_response() -> Result<Response<BoxBody<Bytes, hyper::Error>>,
 }
 
 /// Build circuit breaker open response
-fn build_circuit_breaker_response() -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+fn build_circuit_breaker_response() -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     #[allow(clippy::unwrap_used)]
     Ok(Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)

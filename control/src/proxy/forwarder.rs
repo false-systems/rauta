@@ -4,6 +4,7 @@
 //! Includes protocol detection (HTTP/1.1 vs HTTP/2), connection pooling,
 //! timeout enforcement, and hop-by-hop header filtering.
 
+use crate::error::ProxyError;
 use crate::proxy::backend_pool::{BackendConnectionPools, PoolError};
 use crate::proxy::filters::Timeout;
 use crate::proxy::worker::Worker;
@@ -76,7 +77,7 @@ pub async fn forward_to_backend(
     workers: Option<Workers>,
     worker_index: Option<usize>,
     timeout_config: Option<&Timeout>,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, String> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
     let request_start = Instant::now();
 
     // Read the incoming request body
@@ -95,10 +96,24 @@ pub async fn forward_to_backend(
         Bytes::new() // Empty body, zero allocation
     } else {
         // Slow path: POST/PUT/PATCH may have body
-        // Enforce max body size to prevent OOM from unbounded requests (10MB default)
+        // Stream body with size limit to prevent OOM (10MB default).
+        // Enforced during reading — we stop accepting data once the cap is reached.
         const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
         let body_read_start = Instant::now();
-        let collected = body.collect().await.map_err(|e| {
+        let limited = http_body_util::Limited::new(body, MAX_BODY_SIZE);
+        let collected = limited.collect().await.map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.contains("length limit exceeded") {
+                error!(
+                    request_id = %request_id,
+                    max_size = MAX_BODY_SIZE,
+                    "Request body exceeded size limit"
+                );
+                return ProxyError::BodyTooLarge {
+                    size: MAX_BODY_SIZE + 1,
+                    max: MAX_BODY_SIZE,
+                };
+            }
             error!(
                 request_id = %request_id,
                 error.message = %e,
@@ -106,17 +121,11 @@ pub async fn forward_to_backend(
                 elapsed_us = body_read_start.elapsed().as_micros() as u64,
                 "Failed to read request body"
             );
-            format!("Failed to read request body: {}", e)
+            ProxyError::BackendError {
+                message: format!("Failed to read request body: {}", e),
+            }
         })?;
         let bytes = collected.to_bytes();
-
-        if bytes.len() > MAX_BODY_SIZE {
-            return Err(format!(
-                "Request body too large: {} bytes (max {})",
-                bytes.len(),
-                MAX_BODY_SIZE
-            ));
-        }
 
         let body_read_duration = body_read_start.elapsed();
         info!(
@@ -387,10 +396,12 @@ pub async fn forward_to_backend(
                     network.peer.address = %backend,
                     "Backend request timeout exceeded"
                 );
-                return Err(format!(
-                    "TIMEOUT: Backend request exceeded {}ms timeout",
-                    timeout_duration.as_millis()
-                ));
+                return Err(ProxyError::Timeout {
+                    message: format!(
+                        "Backend request exceeded {}ms timeout",
+                        timeout_duration.as_millis()
+                    ),
+                });
             }
         }
     } else {
