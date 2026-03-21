@@ -71,7 +71,11 @@ impl std::fmt::Display for ProxyError {
 
 impl std::error::Error for ProxyError {}
 
-/// Allow `?` on String errors (legacy compatibility during migration)
+/// Allow `?` on String errors (legacy compatibility during migration).
+///
+/// Maps all string errors to `BackendError` (502). This is a transitional shim —
+/// callers should construct specific ProxyError variants directly. Will be removed
+/// once all error sites are migrated.
 impl From<String> for ProxyError {
     fn from(s: String) -> Self {
         ProxyError::BackendError { message: s }

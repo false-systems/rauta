@@ -102,15 +102,15 @@ pub async fn forward_to_backend(
         let body_read_start = Instant::now();
         let limited = http_body_util::Limited::new(body, MAX_BODY_SIZE);
         let collected = limited.collect().await.map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.contains("length limit exceeded") {
+            // Check if this is a LengthLimitError from http_body_util::Limited
+            if e.is::<http_body_util::LengthLimitError>() {
                 error!(
                     request_id = %request_id,
                     max_size = MAX_BODY_SIZE,
                     "Request body exceeded size limit"
                 );
                 return ProxyError::BodyTooLarge {
-                    size: MAX_BODY_SIZE + 1,
+                    size: 0, // Actual size unknown — reading was aborted at limit
                     max: MAX_BODY_SIZE,
                 };
             }

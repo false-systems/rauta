@@ -237,6 +237,11 @@ pub async fn handle_request(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let path = req.uri().path().to_string();
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| path.clone());
     let method_name = req.method().as_str();
 
     info!(
@@ -344,7 +349,7 @@ pub async fn handle_request(
                 req,
                 &route_match,
                 method,
-                &path,
+                &path_and_query,
                 &request_id,
                 client,
                 backend_pools,
@@ -624,12 +629,8 @@ async fn execute_with_retry(
         );
         tokio::time::sleep(backoff_delay).await;
 
-        // Rebuild request for retry
-        let backend_uri = format!(
-            "http://{}/{}",
-            route_match.backend,
-            path.trim_start_matches('/')
-        );
+        // Rebuild request for retry (preserves query string from original request)
+        let backend_uri = format!("http://{}{}", route_match.backend, path);
 
         let retry_method = match method {
             common::HttpMethod::GET => hyper::Method::GET,
@@ -802,8 +803,12 @@ fn record_request_metrics(
                 .with_label_values(&[method_str, route_pattern, status_str])
                 .observe(duration.as_secs_f64());
 
-            router.record_backend_response(backend, status_code);
-            circuit_breaker.record_failure(backend_id);
+            // Only count backend-originated errors against health/circuit breaker.
+            // Client-side errors (BodyTooLarge) are not the backend's fault.
+            if !matches!(e, ProxyError::BodyTooLarge { .. }) {
+                router.record_backend_response(backend, status_code);
+                circuit_breaker.record_failure(backend_id);
+            }
 
             error!(
                 request_id = %request_id,
