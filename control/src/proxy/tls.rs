@@ -5,8 +5,9 @@
 //! - SNI-based certificate selection
 //! - Integration with hyper HTTPS server
 
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
-use rustls_pemfile::{certs, private_key};
 use std::io::{self, BufReader};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio_rustls::TlsAcceptor;
@@ -75,18 +76,19 @@ impl TlsCertificate {
     }
 
     /// Load certificate and private key from PEM bytes
+    ///
+    /// Uses rustls native PEM parsing (no rustls-pemfile dependency).
     pub fn from_pem(cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, io::Error> {
         // Validate certificate can be parsed
         let mut cert_reader = BufReader::new(cert_pem);
-        certs(&mut cert_reader)
+        CertificateDer::pem_reader_iter(&mut cert_reader)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // Validate private key can be parsed
         let mut key_reader = BufReader::new(key_pem);
-        private_key(&mut key_reader)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No private key found"))?;
+        PrivateKeyDer::from_pem_reader(&mut key_reader)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         Ok(Self {
             cert_chain: cert_pem.to_vec(),
@@ -96,17 +98,16 @@ impl TlsCertificate {
 
     /// Build rustls ServerConfig from this certificate
     pub fn to_server_config(&self) -> Result<Arc<ServerConfig>, io::Error> {
-        // Parse certificate chain
+        // Parse certificate chain (rustls native PEM parsing)
         let mut cert_reader = BufReader::new(&self.cert_chain[..]);
-        let certs = certs(&mut cert_reader)
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut cert_reader)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // Parse private key
         let mut key_reader = BufReader::new(&self.private_key[..]);
-        let key = private_key(&mut key_reader)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No private key found"))?;
+        let key = PrivateKeyDer::from_pem_reader(&mut key_reader)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // Build server config
         let config = ServerConfig::builder()
@@ -144,20 +145,18 @@ impl SniResolver {
 
     /// Helper to parse a TlsCertificate and return a CertifiedKey
     fn parse_certified_key(cert: &TlsCertificate) -> Result<rustls::sign::CertifiedKey, io::Error> {
-        use rustls::pki_types::CertificateDer;
         use rustls::sign::CertifiedKey;
 
-        // Parse certificate chain
+        // Parse certificate chain (rustls native PEM parsing)
         let mut cert_reader = BufReader::new(&cert.cert_chain[..]);
-        let certs: Vec<CertificateDer> = certs(&mut cert_reader)
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut cert_reader)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // Parse private key
         let mut key_reader = BufReader::new(&cert.private_key[..]);
-        let key = private_key(&mut key_reader)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No private key found"))?;
+        let key = PrivateKeyDer::from_pem_reader(&mut key_reader)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // Build signing key
         let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
@@ -482,7 +481,7 @@ mod tests {
 
         let mut root_cert_store = rustls::RootCertStore::empty();
         root_cert_store.add_parsable_certificates(
-            rustls_pemfile::certs(&mut std::io::BufReader::new(&cert_pem[..]))
+            CertificateDer::pem_reader_iter(&mut std::io::BufReader::new(&cert_pem[..]))
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap(),
         );
@@ -608,12 +607,12 @@ mod tests {
 
         let mut root_cert_store = rustls::RootCertStore::empty();
         root_cert_store.add_parsable_certificates(
-            rustls_pemfile::certs(&mut std::io::BufReader::new(&example_cert_pem[..]))
+            CertificateDer::pem_reader_iter(&mut std::io::BufReader::new(&example_cert_pem[..]))
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap(),
         );
         root_cert_store.add_parsable_certificates(
-            rustls_pemfile::certs(&mut std::io::BufReader::new(&test_cert_pem[..]))
+            CertificateDer::pem_reader_iter(&mut std::io::BufReader::new(&test_cert_pem[..]))
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap(),
         );
@@ -790,7 +789,7 @@ mod tests {
 
         let mut root_cert_store = rustls::RootCertStore::empty();
         root_cert_store.add_parsable_certificates(
-            rustls_pemfile::certs(&mut std::io::BufReader::new(&cert_pem[..]))
+            CertificateDer::pem_reader_iter(&mut std::io::BufReader::new(&cert_pem[..]))
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap(),
         );
