@@ -52,45 +52,60 @@ impl GatewayQuery for RemoteGatewayQuery {
 
     async fn list_routes(
         &self,
-        _method_filter: Option<&str>,
-        _path_prefix: Option<&str>,
+        method_filter: Option<&str>,
+        path_prefix: Option<&str>,
     ) -> anyhow::Result<Vec<RouteSnapshot>> {
         let url = format!("{}/api/v1/routes", self.base_url);
         let resp = self.client.get(&url).send().await?.error_for_status()?;
-        Ok(resp.json().await?)
+        let mut routes: Vec<RouteSnapshot> = resp.json().await?;
+
+        // Apply filters client-side (admin API returns all routes)
+        if let Some(method) = method_filter {
+            let m = method.to_uppercase();
+            routes.retain(|r| r.method == m);
+        }
+        if let Some(prefix) = path_prefix {
+            routes.retain(|r| r.pattern.starts_with(prefix));
+        }
+
+        Ok(routes)
     }
 
-    async fn get_route(&self, _pattern: &str) -> anyhow::Result<Option<RouteSnapshot>> {
-        Ok(None)
+    async fn get_route(&self, pattern: &str) -> anyhow::Result<Option<RouteSnapshot>> {
+        let routes = self.list_routes(None, None).await?;
+        Ok(routes.into_iter().find(|r| r.pattern == pattern))
     }
 
     async fn list_circuit_breakers(
         &self,
         _state_filter: Option<&str>,
     ) -> anyhow::Result<Vec<CircuitBreakerSnapshot>> {
-        Ok(vec![])
+        anyhow::bail!("Circuit breaker listing not available via remote query — admin API endpoint not yet implemented")
     }
 
     async fn list_rate_limiters(
         &self,
         _route_filter: Option<&str>,
     ) -> anyhow::Result<Vec<RateLimiterSnapshot>> {
-        Ok(vec![])
+        anyhow::bail!("Rate limiter listing not available via remote query — admin API endpoint not yet implemented")
     }
 
     async fn list_listeners(&self) -> anyhow::Result<Vec<ListenerSnapshot>> {
-        Ok(vec![])
+        let snapshot = self.snapshot().await?;
+        Ok(snapshot.listeners)
     }
 
     async fn cache_stats(&self) -> anyhow::Result<Option<CacheStats>> {
-        Ok(None)
+        let url = format!("{}/api/v1/cache", self.base_url);
+        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        Ok(resp.json().await?)
     }
 
     async fn metrics_snapshot(
         &self,
         _metric_filter: Option<&str>,
     ) -> anyhow::Result<Vec<MetricSnapshot>> {
-        Ok(vec![])
+        anyhow::bail!("Metrics snapshot not available via remote query — admin API endpoint not yet implemented")
     }
 
     async fn diagnose(

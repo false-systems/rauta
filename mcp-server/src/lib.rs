@@ -31,4 +31,3 @@
 //! `LocalGatewayQuery`. For remote access, `RemoteGatewayQuery` (from rauta-cli).
 
 pub mod handler;
-pub mod tools;

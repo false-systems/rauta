@@ -7,7 +7,7 @@
 //! Usage:
 //! ```rust,ignore
 //! let handler = RautaMcpHandler::new(query);
-//! handler.serve(rmcp::transport::stdio()).await?;
+//! rmcp::ServiceExt::serve(handler, rmcp::transport::stdio()).await?;
 //! ```
 
 use agent_api::query::GatewayQuery;
