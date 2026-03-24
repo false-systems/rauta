@@ -30,4 +30,4 @@
 //! The MCP server wraps a `GatewayQuery` implementation. In-process, this is
 //! `LocalGatewayQuery`. For remote access, `RemoteGatewayQuery` (from rauta-cli).
 
-pub mod tools;
+pub mod handler;

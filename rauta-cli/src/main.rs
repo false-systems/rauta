@@ -69,6 +69,9 @@ enum Commands {
         #[arg(long)]
         route: Option<String>,
     },
+
+    /// Start MCP server over stdio (for Claude Code / Cursor integration)
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -168,6 +171,36 @@ async fn main() -> anyhow::Result<()> {
         Commands::Diagnose { symptom, route: _ } => {
             let diagnoses = client.diagnose(&symptom).await?;
             output::render_diagnoses(&diagnoses, &cli.format);
+        }
+        Commands::Mcp => {
+            // MCP server over stdio — stdout is the protocol channel, logs go to stderr
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::from_default_env()
+                        .add_directive(tracing::Level::INFO.into()),
+                )
+                .init();
+
+            tracing::info!("Starting RAUTA MCP server (stdio transport)");
+            tracing::info!("Admin endpoint: {}", cli.endpoint);
+
+            let query: std::sync::Arc<dyn agent_api::query::GatewayQuery> =
+                std::sync::Arc::new(remote_query::RemoteGatewayQuery::new(&cli.endpoint));
+            let handler = mcp_server::handler::RautaMcpHandler::new(query);
+
+            let service = rmcp::ServiceExt::serve(handler, rmcp::transport::stdio())
+                .await
+                .map_err(|e| anyhow::anyhow!("MCP serve error: {}", e))?;
+
+            tracing::info!("MCP server running — waiting for client");
+            service
+                .waiting()
+                .await
+                .map_err(|e| anyhow::anyhow!("MCP wait error: {}", e))?;
+
+            return Ok(());
         }
     }
 
