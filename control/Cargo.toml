@@ -65,7 +65,7 @@ arc-swap = "1"    # Lock-free atomic pointer swaps for RCU pattern
 # TLS termination
 rustls = { version = "0.23", features = ["ring"] }  # Use ring crypto provider
 tokio-rustls = "0.26"
-rustls-pemfile = "2.1"
+# rustls-pemfile removed — using rustls native PEM parsing (pki_types::pem::PemObject)
 
 [lints.clippy]
 # CRITICAL: Prevent lock poisoning panics and unwraps in production code
@@ -88,5 +88,9 @@ toml = "0.8"         # Config file parsing
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
+
+[[bench]]
+name = "hot_path"
+harness = false
 
 [build-dependencies]
