@@ -5,8 +5,7 @@
 //! Benchmarks:
 //! - Circuit breaker allow_request (AtomicU64 CAS)
 //! - Rate limiter try_acquire (AtomicU64 CAS)
-//! - Router select_backend (route lookup + Maglev + health check)
-//! - ArcSwap health data load
+//! - Router select_backend (route lookup + Maglev + health check via ArcSwap)
 
 #![allow(clippy::unwrap_used)]
 

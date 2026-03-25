@@ -1,21 +1,20 @@
 # Oracle K8s Job — runs the oracle test suite against a live RAUTA in-cluster
 #
 # Prerequisites:
-#   1. RAUTA deployed in the 'rauta' namespace
-#   2. Oracle image built and available
+#   1. RAUTA deployed in the 'rauta-system' namespace (see manifests/)
+#   2. Oracle image built: docker build -f eval/k8s/Dockerfile -t false-systems/rauta-oracle .
 #
 # Usage:
 #   kubectl apply -f eval/k8s/oracle-job.yaml
-#   kubectl logs -f job/rauta-oracle -n rauta
+#   kubectl logs -f job/rauta-oracle -n rauta-system
 #
-# The oracle connects to RAUTA's admin API (port 9091) and proxy (port 8080)
-# via Kubernetes Service DNS names.
+# Configure endpoints via env vars if your deployment differs.
 
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: rauta-oracle
-  namespace: rauta
+  namespace: rauta-system
   labels:
     app.kubernetes.io/name: rauta-oracle
     app.kubernetes.io/component: eval
@@ -34,16 +33,9 @@ spec:
           imagePullPolicy: Always
           env:
             - name: RAUTA_PROXY_ENDPOINT
-              value: "http://rauta.rauta.svc:8080"
+              value: "http://rauta-metrics.rauta-system.svc:8080"
             - name: RAUTA_ADMIN_ENDPOINT
-              value: "http://rauta.rauta.svc:9091"
-          command:
-            - cargo
-            - test
-            - --manifest-path
-            - eval/oracle/Cargo.toml
-            - --
-            - --nocapture
+              value: "http://rauta-metrics.rauta-system.svc:9091"
           resources:
             requests:
               cpu: 100m
