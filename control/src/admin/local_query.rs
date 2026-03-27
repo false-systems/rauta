@@ -166,20 +166,11 @@ impl GatewayQuery for LocalGatewayQuery {
 
 impl LocalGatewayQuery {
     fn cache_stats_internal(&self) -> CacheStats {
-        let (hits, misses) = self.router.get_cache_stats();
-        let size = self.router.get_cache_size();
-        let total = hits + misses;
-        let hit_rate = if total > 0 {
-            hits as f64 / total as f64
-        } else {
-            0.0
-        };
-
         CacheStats {
-            hits,
-            misses,
-            size,
-            hit_rate,
+            hits: 0,
+            misses: 0,
+            size: 0,
+            hit_rate: 0.0,
         }
     }
 }
