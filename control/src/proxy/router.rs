@@ -323,7 +323,7 @@ impl Router {
                 .map_err(|e| format!("Failed to add exact route {}: {}", path_str, e))?;
 
             let prefix_pattern = if path_str == "/" {
-                format!("{}{{*rest}}", method_prefix)
+                format!("{}/{{*rest}}", method_prefix)
             } else {
                 format!(
                     "{}{}/{{*rest}}",

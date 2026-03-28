@@ -51,7 +51,7 @@ impl GatewayQuery for LocalGatewayQuery {
             open_circuits,
             exhausted_rate_limiters,
             listeners: vec![],
-            cache_stats: Some(self.cache_stats_internal()),
+            cache_stats: None, // LRU cache removed — ArcSwap is faster
         })
     }
 
@@ -117,7 +117,9 @@ impl GatewayQuery for LocalGatewayQuery {
     }
 
     async fn cache_stats(&self) -> anyhow::Result<Option<CacheStats>> {
-        Ok(Some(self.cache_stats_internal()))
+        // LRU cache was removed — ArcSwap route snapshot is faster.
+        // Return None to signal caching is not applicable.
+        Ok(None)
     }
 
     async fn metrics_snapshot(
@@ -161,16 +163,5 @@ impl GatewayQuery for LocalGatewayQuery {
 
     async fn undrain_backend(&self, _backend: &str) -> anyhow::Result<()> {
         anyhow::bail!("undrain_backend not yet implemented via admin API")
-    }
-}
-
-impl LocalGatewayQuery {
-    fn cache_stats_internal(&self) -> CacheStats {
-        CacheStats {
-            hits: 0,
-            misses: 0,
-            size: 0,
-            hit_rate: 0.0,
-        }
     }
 }
